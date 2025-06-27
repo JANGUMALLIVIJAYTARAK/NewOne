@@ -1,0 +1,82 @@
+# ===================================================================
+# 1. DEPENDENCIES & LOCK FILES
+# ===================================================================
+# Node.js dependencies
+/client/node_modules
+/server/node_modules
+
+# Python virtual environment
+/server/ai_core_service/venv
+/server/ai_core_service/.venv
+
+# Dependency logs & lock files (if not needed for team consistency)
+# package-lock.json # Uncomment if you don't want to commit this
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+
+# ===================================================================
+# 2. BUILD ARTIFACTS & CACHES
+# ===================================================================
+# React build output
+/client/build
+/client/.cache
+
+# Python caches and distribution files
+/server/ai_core_service/__pycache__
+/server/ai_core_service/*.py[cod]
+/server/ai_core_service/*.egg-info
+/server/ai_core_service/dist/
+/server/ai_core_service/build/
+
+# Model caches (Hugging Face, etc.)
+/server/ai_core_service/.cache/
+
+
+# ===================================================================
+# 3. SENSITIVE & ENVIRONMENT-SPECIFIC FILES
+# ===================================================================
+# Never commit environment variables. Use .env.example instead.
+.env
+.env.*
+!.env.example
+
+# Server-specific environment files
+/server/.env
+
+# React-specific environment files
+/client/.env.local
+/client/.env.development.local
+/client/.env.test.local
+/client/.env.production.local
+
+
+# ===================================================================
+# 4. USER-GENERATED & RUNTIME DATA
+# ===================================================================
+# User-specific assets (like uploaded code, docs, images)
+# The .gitkeep file is an exception, to ensure the directory structure is committed.
+/server/assets/*
+!/server/assets/.gitkeep
+
+# User-specific backups
+/server/backup_assets/
+
+# Generated FAISS vector indexes
+/server/faiss_indices/
+
+# Log files
+/server/logs/
+*.log
+
+
+# ===================================================================
+# 5. OS & EDITOR CONFIGURATION
+# ===================================================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.history/
+*.swp
