@@ -45,16 +45,21 @@ class KnowledgeGraphService:
 
     def query_kg(self, query):
         """
-        Query the KG for information.
+        Query the KG for information. Returns empty results if Neo4j is unavailable.
         """
-        # Simple entity search in Neo4j
-        with self.driver.session() as session:
-            result = session.run(
-                "MATCH (e:Entity) WHERE toLower(e.text) CONTAINS toLower($query) RETURN e.text AS text, e.label AS label",
-                query=query
-            )
-            results = [{"text": record["text"], "label": record["label"]} for record in result]
-        return {"results": results}
+        try:
+            with self.driver.session() as session:
+                result = session.run(
+                    "MATCH (e:Entity) WHERE toLower(e.text) CONTAINS toLower($query) RETURN e.text AS text, e.label AS label",
+                    {"query": query}
+                )
+                results = [{"text": record["text"], "label": record["label"]} for record in result]
+            return {"results": results}
+        except Exception as e:
+            # Log the error and return empty results
+            import logging
+            logging.getLogger(__name__).warning(f"KG query failed (Neo4j down?): {e}")
+            return {"results": []}
 
 # Example usage (to be removed in production):
 if __name__ == "__main__":

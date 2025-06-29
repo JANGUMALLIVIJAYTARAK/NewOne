@@ -14,31 +14,32 @@ const path = require('path');
 
 const router = express.Router();
 
-// Replace your chat route handler or insert this logic
-router.post('/start-chat', async (req, res) => {
-  const { userId, message } = req.body;
-
-  // Fetch user's recent history
-  const history = await ChatHistory.find({ userId }).sort({ timestamp: -1 }).limit(10);
-
-  // Summarize that history (step 2 will create this function)
-  const user_history_summary = await summarizeHistory(history);
-
-  // Forward to Python AI backend
-  const response = await axios.post('http://localhost:5000/chat', {
-    message,
-    user_history_summary
-  });
-
-  res.json(response.data);
-});
-
 // --- Configuration & Constants ---
 const PYTHON_AI_SERVICE_URL = process.env.PYTHON_AI_CORE_SERVICE_URL;
 if (!PYTHON_AI_SERVICE_URL) {
     console.error("FATAL ERROR: PYTHON_AI_CORE_SERVICE_URL is not set.");
 }
 const KNOWLEDGE_CHECK_IDENTIFIER = "You are a Socratic quizmaster";
+
+// Health check function for Python AI service
+async function checkPythonServiceHealth() {
+    try {
+        const resp = await axios.get(`${PYTHON_AI_SERVICE_URL}/health`, { timeout: 3000 });
+        return resp.status === 200;
+    } catch (err) {
+        return false;
+    }
+}
+
+// Run health check at startup
+(async () => {
+    const healthy = await checkPythonServiceHealth();
+    if (!healthy) {
+        console.error('FATAL: Python AI service is not reachable at startup. Please check the service.');
+    } else {
+        console.log('Python AI service is healthy at startup.');
+    }
+})();
 
 // --- Helper Functions ---
 const getApiAuthDetails = async (userId, selectedLlmProvider) => {
@@ -62,6 +63,12 @@ const getApiAuthDetails = async (userId, selectedLlmProvider) => {
 
 // --- Routes ---
 router.post('/message', tempAuth, async (req, res) => {
+    // Check Python AI service health before handling the request
+    const healthy = await checkPythonServiceHealth();
+    if (!healthy) {
+        return res.status(503).json({ message: 'Python AI service is unavailable. Please try again later.' });
+    }
+
     // ==================================================================
     //  DEFINITIVE FIX: Add logging to see the incoming request data
     // ==================================================================
@@ -199,6 +206,24 @@ router.post('/message', tempAuth, async (req, res) => {
         const message = error.response?.data?.error || error.message || "An unexpected server error occurred.";
         res.status(status).json({ message });
     }
+});
+
+router.post('/start-chat', async (req, res) => {
+  const { userId, message } = req.body;
+
+  // Fetch user's recent history
+  const history = await ChatHistory.find({ userId }).sort({ timestamp: -1 }).limit(10);
+
+  // Summarize that history (step 2 will create this function)
+  const user_history_summary = await summarizeHistory(history);
+
+  // Forward to Python AI backend
+  const response = await axios.post('http://localhost:5000/chat', {
+    message,
+    user_history_summary
+  });
+
+  res.json(response.data);
 });
 
 router.post('/history', tempAuth, async (req, res) => {

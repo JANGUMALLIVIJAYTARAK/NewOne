@@ -43,25 +43,7 @@ def create_error_response(message, status_code=500):
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    logger.info("\n--- Received request at /health ---")
-    status_details = { 
-        "status": "error", "embedding_model_type": config.EMBEDDING_TYPE, 
-        "embedding_model_name": config.EMBEDDING_MODEL_NAME, "embedding_dimension": None, 
-        "default_index_loaded": False, "gemini_sdk_installed": True, 
-        "ollama_available": llm_handler.ollama_available, "groq_sdk_installed": True, "message": "" 
-    }
-    http_status_code = 503
-    try:
-        model = faiss_handler.get_embedding_model()
-        if model is None: raise RuntimeError("Embedding model could not be initialized.")
-        status_details["embedding_dimension"] = faiss_handler.get_embedding_dimension(model)
-        status_details["default_index_loaded"] = config.DEFAULT_INDEX_USER_ID in faiss_handler.loaded_indices
-        status_details["status"] = "ok"; status_details["message"] = "AI Core service is running."
-        http_status_code = 200
-    except Exception as e:
-        logger.error(f"--- Health Check Critical Error ---", exc_info=True)
-        status_details["message"] = f"Health check failed critically: {str(e)}"
-    return jsonify(status_details), http_status_code
+    return jsonify({'status': 'ok'}), 200
 
 @app.route('/add_document', methods=['POST'])
 def add_document():
@@ -110,6 +92,11 @@ def generate_chat_response_route():
     current_user_query = data.get('query')
     if not user_id or not current_user_query:
         return create_error_response("Missing user_id or query in request", 400)
+
+    # --- KG Integration: Extract entities/relations from user query and context ---
+    kg_entities = kg_service.extract_entities_and_relations(current_user_query)
+    kg_facts = kg_service.query_kg(current_user_query)
+    kg_context = f"\n[KG Entities]: {kg_entities}\n[KG Facts]: {kg_facts}\n"
 
     routing_decision = llm_router.route_query(current_user_query, data.get('llm_provider', config.DEFAULT_LLM_PROVIDER), data.get('llm_model_name'))
     final_provider = routing_decision['provider']
@@ -167,8 +154,20 @@ def generate_chat_response_route():
             if docs_for_context:
                 logger.info("Local documents found, but they were NOT RELEVANT to the query. Falling back to web search.")
             else:
-                logger.info("No relevant local documents found. Falling back to web search.")
-            
+                logger.info("No relevant local documents found. Not falling back to web search if active_file is set.")
+                # If user asked about a PDF and no content was found, warn the user
+                if data.get('active_file'):
+                    return jsonify({
+                        "llm_response": "[No content found for the selected PDF. Please check if the file was indexed correctly or try re-uploading.]",
+                        "references": [],
+                        "thinking_content": None,
+                        "status": "success",
+                        "provider_used": final_provider,
+                        "model_used": final_model,
+                        "context_source": "PDF (not found)",
+                        "kg_entities": kg_entities,
+                        "kg_facts": kg_facts
+                    }), 200
             try:
                 web_context = web_search.perform_search(current_user_query)
                 if web_context:
@@ -176,24 +175,25 @@ def generate_chat_response_route():
                     context_source = "Web Search"
             except Exception as e:
                 logger.error(f"Web search failed: {e}", exc_info=True)
-    
+    # --- Compose system prompt with KG context ---
+    orig_system_prompt = data.get('system_prompt') or "You are a helpful assistant."
+    system_prompt = f"{orig_system_prompt}\n{kg_context}"
     try:
         logger.info(f"Calling final LLM provider: {final_provider} with context from: {context_source}")
-        
         final_answer, thinking_content = llm_handler.generate_response(
             llm_provider=final_provider,
             query=current_user_query,
             context_text=context_text_for_llm,
             **handler_kwargs
         )
-        
         return jsonify({
             "llm_response": final_answer, "references": rag_references_for_client,
             "thinking_content": thinking_content, "status": "success",
             "provider_used": final_provider, "model_used": final_model,
-            "context_source": context_source
+            "context_source": context_source,
+            "kg_entities": kg_entities,
+            "kg_facts": kg_facts
         }), 200
-
     except (ConnectionError, ValueError) as e:
         return create_error_response(str(e), 502)
     except Exception as e:
@@ -280,17 +280,31 @@ def extract_text_route():
     print(f"DEBUG: Received /extract_text for file_path: {file_path}")
     if not file_path or not os.path.exists(file_path):
         print(f"ERROR: File not found for extraction: {file_path}")
-        return jsonify({'status': 'error', 'error': 'File not found'}), 404
+        return jsonify({'status': 'error', 'error': 'File not found', 'file_path': file_path}), 404
     try:
         text = file_parser.parse_file(file_path)
         print(f"DEBUG: Extracted text length: {len(text) if text else 0}")
         if not text:
             print(f"ERROR: Could not extract text from file: {file_path}")
-            return jsonify({'status': 'error', 'error': 'Could not extract text from file'}), 400
+            # Try to debug PDF parsing specifically
+            import traceback
+            try:
+                from . import file_parser as fp
+                _, ext = os.path.splitext(file_path)
+                if ext.lower() == '.pdf':
+                    print("DEBUG: Attempting direct PDF parse for error details...")
+                    pdf_text = fp.parse_pdf(file_path)
+                    print(f"DEBUG: Direct PDF parse result: {pdf_text is not None}, length: {len(pdf_text) if pdf_text else 0}")
+            except Exception as pdf_debug_err:
+                print(f"DEBUG: Exception during direct PDF parse: {pdf_debug_err}")
+                traceback.print_exc()
+            return jsonify({'status': 'error', 'error': 'Could not extract text from file', 'file_path': file_path}), 400
         return jsonify({'status': 'success', 'text': text}), 200
     except Exception as e:
+        import traceback
         print(f"ERROR: Exception in /extract_text: {e}")
-        return jsonify({'status': 'error', 'error': str(e)}), 500
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'error': str(e), 'file_path': file_path}), 500
 
 @app.route('/kg/extract', methods=['POST'])
 def kg_extract():
