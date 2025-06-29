@@ -38,7 +38,11 @@ tiktoken              # Tokenizer used by OpenAI models, often useful with Langc
 duckduckgo-search
 newspaper3k
 lxml                  # For robust HTML parsing, required by newspaper3k
+lxml_html_clean
 
 # HTTP Client Libraries
 requests              # General purpose HTTP client
 httpx                 # Modern HTTP client, supports async
+
+# Additional Dependencies for ai_core_service
+redis

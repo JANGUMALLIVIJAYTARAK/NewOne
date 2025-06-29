@@ -21,7 +21,7 @@ import AnalysisResultModal from './AnalysisResultModal';
 import VoiceInputButton from './VoiceInputButton';
 
 // --- Icons ---
-import { FiMessageSquare, FiDatabase, FiSettings, FiLogOut, FiSun, FiMoon, FiSend, FiPlus, FiArchive, FiShield } from 'react-icons/fi';
+import { FiMessageSquare, FiDatabase, FiSettings, FiLogOut, FiSun, FiMoon, FiSend, FiPlus, FiArchive, FiShield, FiDownload } from 'react-icons/fi';
 
 // --- Styles ---
 import './ChatPage.css';
@@ -124,6 +124,7 @@ const ChatPage = ({ setIsAuthenticated }) => {
     const [enableMultiQuery, setEnableMultiQuery] = useState(true);
     const [isAnalysisModalOpen, setIsAnalysisModalOpen] = useState(false);
     const [analysisModalData, setAnalysisModalData] = useState(null);
+    const [activeFile, setActiveFile] = useState(localStorage.getItem('activeFile') || null);
 
     // --- Refs & Hooks ---
     const messagesEndRef = useRef(null);
@@ -135,6 +136,13 @@ const ChatPage = ({ setIsAuthenticated }) => {
             setInputText(transcript);
         }
     }, [transcript, listening]);
+
+    // Move performLogoutCleanup above useEffect and useCallback hooks that use it
+    const performLogoutCleanup = useCallback(() => {
+        localStorage.clear();
+        setIsAuthenticated(false);
+        navigate('/login', { replace: true });
+    }, [setIsAuthenticated, navigate]);
 
     useEffect(() => {
         const fetchUserInfo = async () => {
@@ -158,14 +166,8 @@ const ChatPage = ({ setIsAuthenticated }) => {
             }
         };
         fetchUserInfo();
-    }, [navigate, setIsAuthenticated]);
+    }, [navigate, setIsAuthenticated, performLogoutCleanup]);
 
-    const performLogoutCleanup = useCallback(() => {
-        localStorage.clear();
-        setIsAuthenticated(false);
-        navigate('/login', { replace: true });
-    }, [setIsAuthenticated, navigate]);
-    
     const handlePromptSelectChange = useCallback((newId) => {
         setCurrentSystemPromptId(newId);
         setEditableSystemPromptText(getPromptTextById(newId));
@@ -191,7 +193,7 @@ const ChatPage = ({ setIsAuthenticated }) => {
         setIsLoading(false);
         if (onCompleteCallback) onCompleteCallback();
 
-    }, [messages, handlePromptSelectChange]);
+    }, [messages, handlePromptSelectChange]); // Remove performLogoutCleanup if not used inside
     
     const handleLogout = useCallback(() => saveAndReset(true, performLogoutCleanup), [saveAndReset, performLogoutCleanup]);
 
@@ -216,7 +218,7 @@ const ChatPage = ({ setIsAuthenticated }) => {
             sessionId: localStorage.getItem('sessionId'),
             systemPrompt: editableSystemPromptText,
             isRagEnabled, llmProvider, llmModelName: llmModelName || null, enableMultiQuery,
-            activeFile: localStorage.getItem('activeFile') || null
+            activeFile: activeFile || null
         };
 
         try {
@@ -230,7 +232,7 @@ const ChatPage = ({ setIsAuthenticated }) => {
         } finally {
             setIsLoading(false);
         }
-    }, [inputText, isLoading, messages, editableSystemPromptText, isRagEnabled, llmProvider, llmModelName, enableMultiQuery, resetTranscript]);
+    }, [inputText, isLoading, messages, editableSystemPromptText, isRagEnabled, llmProvider, llmModelName, enableMultiQuery, resetTranscript, activeFile]);
     
     // ==================================================================
     //  START OF MODIFICATION
@@ -240,7 +242,17 @@ const ChatPage = ({ setIsAuthenticated }) => {
         setFileRefreshTrigger(p => p + 1); // Refreshes the file list in FileManagerWidget.
         setIsRagEnabled(true); // Automatically enable the RAG toggle.
         setHasFiles(true); // Assume we have files now, allowing RAG to be enabled.
-    }, []); // No dependencies needed as setters are stable.
+        // Auto-activate the most recently uploaded file
+        getUserFiles().then(response => {
+            const files = response.data || [];
+            if (files.length > 0) {
+                // Sort by lastModified or just pick the last one
+                const latestFile = files.reduce((a, b) => (a.lastModified > b.lastModified ? a : b));
+                setActiveFile(latestFile.relativePath);
+                localStorage.setItem('activeFile', latestFile.relativePath);
+            }
+        });
+    }, []);
     // ==================================================================
     //  END OF MODIFICATION
     // ==================================================================
@@ -288,6 +300,11 @@ const ChatPage = ({ setIsAuthenticated }) => {
         doc.save('chat_history.pdf');
     }, [messages, username]);
     
+    const handleFileSelect = useCallback((filePath) => {
+        setActiveFile(filePath);
+        localStorage.setItem('activeFile', filePath);
+    }, []);
+
     const sidebarProps = {
         currentSystemPromptId, editableSystemPromptText,
         handlePromptSelectChange, handlePromptTextChange,
@@ -295,13 +312,13 @@ const ChatPage = ({ setIsAuthenticated }) => {
         isProcessing: isLoading, llmModelName, handleLlmModelChange,
         enableMultiQuery, handleMultiQueryToggle, isRagEnabled,
         triggerFileRefresh, refreshTrigger: fileRefreshTrigger, onAnalysisComplete,
-        setHasFiles // Pass this down to FileManagerWidget
+        setHasFiles, onFileSelect: handleFileSelect // Pass this down to FileManagerWidget
     };
 
     return (
         <div className="main-layout">
             <ActivityBar activeView={activeView} setActiveView={setActiveView} />
-            <Sidebar activeView={activeView} {...sidebarProps} />
+            <Sidebar activeView={activeView} {...sidebarProps} activeFile={activeFile} />
             <div className="chat-view">
                 <header className="chat-header">
                     <h1>FusedChat</h1>
@@ -309,6 +326,7 @@ const ChatPage = ({ setIsAuthenticated }) => {
                         <span className="username-display">Hi, {username}</span>
                         <ThemeToggleButton />
                         <button onClick={handleHistory} className="header-button" title="Chat History" disabled={isLoading}><FiArchive size={20} /></button>
+                        <button onClick={handleDownloadChat} className="header-button" title="Download Chat" disabled={messages.length === 0}><FiDownload size={20} /></button>
                         <button onClick={handleNewChat} className="header-button" title="New Chat" disabled={isLoading}><FiPlus size={20} /></button>
                         <button onClick={() => navigate('/settings')} className="header-button" title="Settings" disabled={isLoading}><FiSettings size={20} /></button>
                         {userRole === 'admin' && (
@@ -317,7 +335,6 @@ const ChatPage = ({ setIsAuthenticated }) => {
                             </button>
                         )}
                         <button onClick={handleLogout} className="header-button" title="Logout" disabled={isLoading}><FiLogOut size={20} /></button>
-                        <button onClick={handleDownloadChat} className="header-button" title="Download Chat" disabled={messages.length === 0}>Download Chat</button>
                     </div>
                 </header>
                 <main className="messages-area" ref={messagesEndRef}>
@@ -351,6 +368,10 @@ const ChatPage = ({ setIsAuthenticated }) => {
                     {isLoading && <div className="loading-indicator"><span>Thinking...</span></div>}
                     {!isLoading && error && <div className="error-indicator">{error}</div>}
                 </div>
+                {/* PDF Q&A warning */}
+                {inputText.match(/pdf|topics|headings|subheadings/i) && !activeFile && (
+                    <div className="fm-error" style={{margin:'10px',textAlign:'center'}}>Please activate a file in the file manager to ask questions about a PDF.</div>
+                )}
                 <footer className="input-area">
                     <textarea value={inputText} onChange={(e) => setInputText(e.target.value)} onKeyDown={handleEnterKey} placeholder="Type or say something..." rows="1" disabled={isLoading} />
                     <VoiceInputButton isListening={listening} onToggleListen={handleToggleListen} isSupported={browserSupportsSpeechRecognition} />

@@ -48,7 +48,9 @@ const formatFileSize = (bytes) => {
 
 const FileManagerWidget = ({
     refreshTrigger,
-    onAnalysisComplete
+    onAnalysisComplete,
+    onFileSelect,
+    activeFile // <-- new prop
 }) => {
     // State hooks
     const [userFiles, setUserFiles] = useState([]);
@@ -252,7 +254,7 @@ const FileManagerWidget = ({
                 ) : (
                     <ul className="fm-file-list">
                         {userFiles.map((file) => (
-                            <li key={file.serverFilename} className="fm-file-item">
+                            <li key={file.serverFilename} className={`fm-file-item${activeFile === file.relativePath ? ' fm-file-item-active' : ''}`}> {/* highlight active */}
                                 <span className="fm-file-icon">{getFileIcon(file.type)}</span>
                                 <div className="fm-file-details">
                                     {renamingFile === file.serverFilename ? (
@@ -274,6 +276,7 @@ const FileManagerWidget = ({
                                         <button onClick={() => handleAnalyzeClick(file)} disabled={!!renamingFile || isAnalyzingInProgress} className="fm-action-btn fm-analyze-btn" title="Analyze Document"><FiPlayCircle size={16} /></button>
                                         <button onClick={() => handleRenameClick(file)} disabled={!!renamingFile || isAnalyzingInProgress} className="fm-action-btn fm-rename-btn" title="Rename"><FiEdit2 size={16} /></button>
                                         <button onClick={() => handleDeleteFile(file.serverFilename, file.originalName)} disabled={!!renamingFile || isAnalyzingInProgress} className="fm-action-btn fm-delete-btn" title="Delete"><FiTrash2 size={16} /></button>
+                                        <button onClick={() => onFileSelect && onFileSelect(file.relativePath)} disabled={isAnalyzingInProgress} className="fm-action-btn fm-activate-btn" title="Activate for Chat">{activeFile === file.relativePath ? '✅' : '🔗'}</button>
                                     </div>
                                 )}
 
@@ -351,6 +354,7 @@ const FileManagerWidgetCSS = `
 .fm-secondary-btn { background-color: var(--bg-tertiary); color: var(--text-primary); border-color: var(--border-primary); }
 .fm-secondary-btn:hover:not(:disabled) { border-color: var(--text-secondary); }
 .fm-primary-btn:disabled, .fm-secondary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.fm-file-item-active { background: #e6f7ff; border-left: 4px solid #1890ff; }
 `;
 
 const styleTagFileManagerId = 'file-manager-widget-styles';

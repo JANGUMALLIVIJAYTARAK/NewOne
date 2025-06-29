@@ -16,6 +16,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document as LangchainDocument
 from . import config # Import from the current package (ai_core_service)
 import logging
+import re
 
 # Configure logger for this module
 logger = logging.getLogger(__name__)
@@ -171,3 +172,12 @@ def chunk_text(text, file_name, user_id):
     except Exception as e:
         logger.error(f"Error during text splitting for file {file_name}: {e}", exc_info=True)
         return [] # Return empty list on error
+
+def extract_headings(text, chapter_prefix="5."):
+    """
+    Extracts structured headings from a document like:
+    5.1 Air Pollution, 5.2.1 Water Pollution, etc.
+    """
+    pattern = re.compile(rf"{re.escape(chapter_prefix)}\d*(?:\.\d+)*\s+([A-Za-z].+)")
+    matches = pattern.findall(text)
+    return list(dict.fromkeys([match.strip() for match in matches]))  # Unique, ordered

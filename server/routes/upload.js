@@ -203,6 +203,27 @@ router.post('/', tempAuth, (req, res) => {
         console.log(`<<< POST /api/upload successful for User '${req.user.username}'. File: ${serverFilename}.`);
         console.log(`   Absolute path: ${absoluteFilePath}`);
 
+        // --- Extract topics from the uploaded file ---
+        try {
+            const pythonServiceUrl = process.env.PYTHON_AI_CORE_SERVICE_URL;
+            if (pythonServiceUrl) {
+                const extractTopicsResponse = await axios.post(
+                    `${pythonServiceUrl}/extract_topics_from_file`,
+                    { file_path: absoluteFilePath }
+                );
+                if (extractTopicsResponse.data?.status === 'success') {
+                    console.log(`Extracted topics for ${originalName}:`, extractTopicsResponse.data.topics);
+                    // Optionally, save topics to DB or attach to file metadata here
+                } else {
+                    console.warn(`Topic extraction failed for ${originalName}:`, extractTopicsResponse.data);
+                }
+            } else {
+                console.warn('PYTHON_AI_CORE_SERVICE_URL not set, skipping topic extraction.');
+            }
+        } catch (topicErr) {
+            console.error(`Error extracting topics for ${originalName}:`, topicErr.message || topicErr);
+        }
+
         // --- Trigger Python processing asynchronously ---
         // No await here, let the response go back quickly
         triggerPythonRagProcessing(userId, absoluteFilePath, originalName)

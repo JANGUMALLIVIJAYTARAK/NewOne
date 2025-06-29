@@ -11,12 +11,14 @@ import json
 try:
     from . import config, file_parser, faiss_handler, llm_handler, llm_router
     from .tools import web_search
+    from ai_core_service.kg_service import KnowledgeGraphService
 except ImportError:
     current_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(current_dir)
     if parent_dir not in sys.path: sys.path.insert(0, parent_dir)
     import config, file_parser, faiss_handler, llm_handler, llm_router
     from tools import web_search
+    from ai_core_service.kg_service import KnowledgeGraphService
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(name)s:%(lineno)d] - %(message)s')
 logger = logging.getLogger(__name__)
@@ -31,6 +33,9 @@ try:
 except redis.exceptions.ConnectionError as e:
     logger.error(f"Could not connect to Redis: {e}. Caching will be DISABLED.")
     redis_client = None
+
+# Initialize KG service (customize connection params as needed)
+kg_service = KnowledgeGraphService()
 
 def create_error_response(message, status_code=500):
     logger.error(f"API Error Response ({status_code}): {message}")
@@ -195,6 +200,181 @@ def generate_chat_response_route():
         logger.error(f"Unhandled exception in generate_chat_response: {e}", exc_info=True)
         return create_error_response(f"Failed to generate chat response: {str(e)}", 500)
 
+@app.route('/chat', methods=['POST'])
+def chat():
+    data = request.json
+    message = data['message']
+    user_history_summary = data.get('user_history_summary', '')
+    user_ollama_host = data.get('user_ollama_host')  # Optionally sent from frontend
+    api_keys = data.get('api_keys', {})  # Optionally sent from frontend or loaded from settings
+    model_name = data.get('model_name')
+
+    # --- KG Integration: Extract entities/relations from user query and context ---
+    kg_entities = kg_service.extract_entities_and_relations(message)
+    kg_facts = kg_service.query_kg(message)
+    kg_context = f"\n[KG Entities]: {kg_entities}\n[KG Facts]: {kg_facts}\n"
+
+    system_prompt = f"""You are a helpful assistant. Here is some background about the user:\n{user_history_summary}\n{kg_context}\nRespond to their message: {message}\n"""
+
+    try:
+        response, provider_used = get_llm_response_with_fallback(
+            prompt=message,
+            is_chat=True,
+            chat_history=[],  # Optionally pass chat history if available
+            system_prompt=system_prompt,
+            user_ollama_host=user_ollama_host,
+            api_keys=api_keys,
+            model_name=model_name
+        )
+        return jsonify({'response': response, 'provider': provider_used, 'kg_entities': kg_entities, 'kg_facts': kg_facts})
+    except Exception as e:
+        return create_error_response(f"All LLM providers failed: {e}")
+
+@app.route('/extract_topics_from_file', methods=['POST'])
+def extract_topics_from_file():
+    data = request.get_json()
+    file_path = data.get('file_path')
+    chapter_prefix = data.get('chapter_prefix', '5.')  # Optional: for specific chapters
+
+    if not file_path or not os.path.exists(file_path):
+        return create_error_response("Valid file_path required", 400)
+
+    try:
+        text = file_parser.parse_file(file_path)
+        if not text:
+            return create_error_response("Unable to extract text from file.", 400)
+        
+        topics = file_parser.extract_headings(text, chapter_prefix=chapter_prefix)
+        return jsonify({"topics": topics, "status": "success"}), 200
+    except Exception as e:
+        return create_error_response(f"Failed to extract topics: {e}", 500)
+
+@app.route('/extract_headings', methods=['POST'])
+def extract_headings_route():
+    data = request.get_json()
+    file_path = data.get('file_path')
+    print(f"DEBUG: Received /extract_headings for file_path: {file_path}")
+    if not file_path or not os.path.exists(file_path):
+        print(f"ERROR: File not found for extraction: {file_path}")
+        return jsonify({'status': 'error', 'error': 'File not found'}), 404
+    try:
+        text = file_parser.parse_file(file_path)
+        print(f"DEBUG: Extracted text length: {len(text) if text else 0}")
+        if not text:
+            print(f"ERROR: Could not extract text from file: {file_path}")
+            return jsonify({'status': 'error', 'error': 'Could not extract text from file'}), 400
+        import re
+        match = re.search(r'Chapter(\d+)', os.path.basename(file_path), re.IGNORECASE)
+        chapter_prefix = f"{match.group(1)}." if match else ''
+        headings = file_parser.extract_headings(text, chapter_prefix=chapter_prefix)
+        print(f"DEBUG: Extracted headings: {headings}")
+        return jsonify({'status': 'success', 'headings': headings}), 200
+    except Exception as e:
+        print(f"ERROR: Exception in /extract_headings: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+@app.route('/extract_text', methods=['POST'])
+def extract_text_route():
+    data = request.get_json()
+    file_path = data.get('file_path')
+    print(f"DEBUG: Received /extract_text for file_path: {file_path}")
+    if not file_path or not os.path.exists(file_path):
+        print(f"ERROR: File not found for extraction: {file_path}")
+        return jsonify({'status': 'error', 'error': 'File not found'}), 404
+    try:
+        text = file_parser.parse_file(file_path)
+        print(f"DEBUG: Extracted text length: {len(text) if text else 0}")
+        if not text:
+            print(f"ERROR: Could not extract text from file: {file_path}")
+            return jsonify({'status': 'error', 'error': 'Could not extract text from file'}), 400
+        return jsonify({'status': 'success', 'text': text}), 200
+    except Exception as e:
+        print(f"ERROR: Exception in /extract_text: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+@app.route('/kg/extract', methods=['POST'])
+def kg_extract():
+    data = request.json
+    text = data.get('text', '')
+    if not text:
+        return create_error_response('No text provided for KG extraction.', 400)
+    result = kg_service.extract_entities_and_relations(text)
+    return jsonify(result)
+
+@app.route('/kg/query', methods=['POST'])
+def kg_query():
+    data = request.json
+    query = data.get('query', '')
+    if not query:
+        return create_error_response('No query provided for KG search.', 400)
+    result = kg_service.query_kg(query)
+    return jsonify(result)
+
+def get_llm_response_with_fallback(prompt, is_chat=True, chat_history=None, system_prompt=None, user_ollama_host=None, api_keys=None, model_name=None):
+    """
+    Try LLM providers in order: user Ollama, default Ollama, Gemini, Groq.
+    Returns (response, provider_used).
+    """
+    from ai_core_service import llm_handler, config
+    api_keys = api_keys or {}
+    chat_history = chat_history or []
+    # 1. Try user-specified Ollama
+    if user_ollama_host:
+        try:
+            handler = llm_handler.get_handler(
+                provider_name="ollama",
+                api_keys=api_keys,
+                model_name=model_name,
+                ollama_host=user_ollama_host,
+                chat_history=chat_history,
+                system_prompt=system_prompt
+            )
+            response = handler.generate_response(prompt, is_chat=is_chat)
+            return response, "ollama:user"
+        except Exception as e:
+            logger.warning(f"User Ollama failed: {e}")
+    # 2. Try default Ollama
+    try:
+        handler = llm_handler.get_handler(
+            provider_name="ollama",
+            api_keys=api_keys,
+            model_name=model_name,
+            chat_history=chat_history,
+            system_prompt=system_prompt
+        )
+        response = handler.generate_response(prompt, is_chat=is_chat)
+        return response, "ollama:default"
+    except Exception as e:
+        logger.warning(f"Default Ollama failed: {e}")
+    # 3. Try Gemini
+    if api_keys.get('gemini'):
+        try:
+            handler = llm_handler.get_handler(
+                provider_name="gemini",
+                api_keys=api_keys,
+                model_name=model_name,
+                chat_history=chat_history,
+                system_prompt=system_prompt
+            )
+            response = handler.generate_response(prompt, is_chat=is_chat)
+            return response, "gemini"
+        except Exception as e:
+            logger.warning(f"Gemini failed: {e}")
+    # 4. Try Groq
+    if api_keys.get('grok'):
+        try:
+            handler = llm_handler.get_handler(
+                provider_name="groq",
+                api_keys=api_keys,
+                model_name=model_name,
+                chat_history=chat_history,
+                system_prompt=system_prompt
+            )
+            response = handler.generate_response(prompt, is_chat=is_chat)
+            return response, "groq"
+        except Exception as e:
+            logger.warning(f"Groq failed: {e}")
+    raise RuntimeError("All LLM providers failed. Check configuration and connectivity.")
 
 if __name__ == '__main__':
     try:

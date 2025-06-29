@@ -82,7 +82,8 @@ router.post('/document', tempAuth, async (req, res) => {
             llm_provider: selectedLlmProvider,
             llm_model_name: llmModelName,
             api_keys: keysForPython,
-            ollama_host: ollamaHost
+            ollama_host: ollamaHost,
+            context: `Perform a ${analysisType} analysis on the document. Break down the task into steps: 1) Identify key sections, 2) Extract relevant information based on ${analysisType}, 3) Synthesize findings into a concise response. Ensure the output is structured and addresses the user's intent.`
         };
         console.log('[DEBUG] /analysis/document payload ollama_host:', pythonPayload.ollama_host);
 
