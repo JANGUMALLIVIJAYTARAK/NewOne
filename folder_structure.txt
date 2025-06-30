@@ -1,0 +1,106 @@
+final/
+├── .gitignore
+├── README.md
+├── evaluation_results.json
+├── client/
+│   ├── package-lock.json
+│   ├── package.json
+│   ├── public/
+│   │   ├── favicon.ico
+│   │   ├── index.html
+│   │   ├── logo192.png
+│   │   ├── logo512.png
+│   │   ├── manifest.json
+│   │   └── robots.txt
+│   └── src/
+│       ├── App.css
+│       ├── App.js
+│       ├── App.test.js
+│       ├── index.css
+│       ├── index.js
+│       ├── logo.svg
+│       ├── reportWebVitals.js
+│       ├── setupTests.js
+│       ├── components/
+│       │   ├── AdminPanel.css
+│       │   ├── AdminPanel.js
+│       │   ├── AnalysisResultModal.css
+│       │   ├── AnalysisResultModal.js
+│       │   ├── ApiKeyModal.css
+│       │   ├── ApiKeyModal.js
+│       │   ├── AuthPage.js
+│       │   ├── ChatPage.css
+│       │   ├── ChatPage.js
+│       │   ├── FileManagerWidget.js
+│       │   ├── FileUploadWidget.js
+│       │   ├── HistoryModal.js
+│       │   ├── MainLayout.js
+│       │   ├── MermaidDiagram.js
+│       │   ├── SettingsPage.css
+│       │   ├── SettingsPage.js
+│       │   ├── Sidebar.js
+│       │   ├── SystemPromptWidget.js
+│       │   └── VoiceInputButton.js
+│       ├── config/
+│       │   └── constants.js
+│       ├── context/
+│       │   └── ThemeContext.js
+│       └── services/
+│           └── api.js
+├── evaluation/
+│   ├── eval_dataset.json
+│   ├── machine_learning.md
+│   └── run_eval.py
+├── server/
+│   ├── install.sh
+│   ├── package-lock.json
+│   ├── package.json
+│   ├── server.js
+│   ├── ai_core_service/
+│   │   ├── __init__.py
+│   │   ├── app.py
+│   │   ├── config.py
+│   │   ├── default.py
+│   │   ├── faiss_handler.py
+│   │   ├── file_parser.py
+│   │   ├── kg_neo4j_example.py
+│   │   ├── kg_service.py
+│   │   ├── llm_handler.py
+│   │   ├── llm_router.py
+│   │   ├── Readne.txt
+│   │   ├── requirements.txt
+│   │   └── tools/
+│   │       └── web_search.py
+│   ├── assets/
+│   │   └── .gitkeep
+│   ├── backup_assets/
+│   ├── config/
+│   │   └── db.js
+│   ├── faiss_indices/
+│   ├── logs/
+│   ├── middleware/
+│   │   └── authMiddleware.js
+│   ├── models/
+│   │   ├── ChatHistory.js
+│   │   └── User.js
+│   ├── routes/
+│   │   ├── admin.js
+│   │   ├── analysis.js
+│   │   ├── auth.js
+│   │   ├── chat.js
+│   │   ├── files.js
+│   │   ├── history.js
+│   │   ├── network.js
+│   │   ├── settings.js
+│   │   ├── syllabus.js
+│   │   └── upload.js
+│   ├── services/
+│   │   └── encryptionService.js
+│   ├── syllabi/
+│   │   ├── embedded_systems.md
+│   │   └── machine_learning.md
+│   ├── utils/
+│   │   ├── assetCleanup.js
+│   │   ├── logger.js
+│   │   ├── networkUtils.js
+│   │   └── summarizeHistory.js

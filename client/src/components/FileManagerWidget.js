@@ -254,11 +254,18 @@ const FileManagerWidget = ({
                 ) : (
                     <ul className="fm-file-list">
                         {userFiles.map((file) => (
-                            <li key={file.serverFilename} className={`fm-file-item${activeFile === file.relativePath ? ' fm-file-item-active' : ''}`}> {/* highlight active */}
+                            <li
+                                key={file.serverFilename}
+                                className={`fm-file-item${activeFile === file.originalName ? ' fm-file-item-active' : ''}`}
+                                // ✅ FIX 1: Make the whole item clickable to activate it for chat
+                                onClick={() => onFileSelect && onFileSelect(file.originalName)}
+                                style={{ cursor: 'pointer' }} // Add a pointer cursor for better UX
+                                title={`Click to chat with ${file.originalName}`}
+                            >
                                 <span className="fm-file-icon">{getFileIcon(file.type)}</span>
                                 <div className="fm-file-details">
                                     {renamingFile === file.serverFilename ? (
-                                        <div className="fm-rename-section">
+                                        <div className="fm-rename-section" onClick={(e) => e.stopPropagation()}> {/* Stop propagation on this div too */}
                                             <input type="text" value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={handleRenameInputKeyDown} autoFocus className="fm-rename-input"/>
                                             <button onClick={handleRenameSave} disabled={!newName.trim()} className="fm-action-btn fm-save-btn" title="Save"><FiSave size={16} /></button>
                                             <button onClick={handleRenameCancel} className="fm-action-btn fm-cancel-btn" title="Cancel"><FiX size={16} /></button>
@@ -273,15 +280,18 @@ const FileManagerWidget = ({
 
                                 {renamingFile !== file.serverFilename && (
                                     <div className="fm-file-actions">
-                                        <button onClick={() => handleAnalyzeClick(file)} disabled={!!renamingFile || isAnalyzingInProgress} className="fm-action-btn fm-analyze-btn" title="Analyze Document"><FiPlayCircle size={16} /></button>
-                                        <button onClick={() => handleRenameClick(file)} disabled={!!renamingFile || isAnalyzingInProgress} className="fm-action-btn fm-rename-btn" title="Rename"><FiEdit2 size={16} /></button>
-                                        <button onClick={() => handleDeleteFile(file.serverFilename, file.originalName)} disabled={!!renamingFile || isAnalyzingInProgress} className="fm-action-btn fm-delete-btn" title="Delete"><FiTrash2 size={16} /></button>
-                                        <button onClick={() => onFileSelect && onFileSelect(file.relativePath)} disabled={isAnalyzingInProgress} className="fm-action-btn fm-activate-btn" title="Activate for Chat">{activeFile === file.relativePath ? '✅' : '🔗'}</button>
+                                        {/* ✅ FIX 2: Stop propagation for all action buttons to prevent conflicts */}
+                                        <button onClick={(e) => { e.stopPropagation(); handleAnalyzeClick(file); }} disabled={!!renamingFile || isAnalyzingInProgress} className="fm-action-btn fm-analyze-btn" title="Analyze Document"><FiPlayCircle size={16} /></button>
+                                        <button onClick={(e) => { e.stopPropagation(); handleRenameClick(file); }} disabled={!!renamingFile || isAnalyzingInProgress} className="fm-action-btn fm-rename-btn" title="Rename"><FiEdit2 size={16} /></button>
+                                        <button onClick={(e) => { e.stopPropagation(); handleDeleteFile(file.serverFilename, file.originalName); }} disabled={!!renamingFile || isAnalyzingInProgress} className="fm-action-btn fm-delete-btn" title="Delete"><FiTrash2 size={16} /></button>
+                                        
+                                        {/* ✅ FIX 3: The separate "Activate for Chat" button has been removed. */}
                                     </div>
                                 )}
 
                                 {analyzingFile && analyzingFile.serverFilename === file.serverFilename && (
-                                    <div className="fm-analysis-options">
+                                    // Stop propagation on the analysis options panel
+                                    <div className="fm-analysis-options" onClick={(e) => e.stopPropagation()}>
                                         {currentAnalysisError && <div className="fm-analysis-error">{currentAnalysisError}</div>}
                                         <select value={selectedAnalysisType} onChange={handleAnalysisTypeChange} disabled={isAnalyzingInProgress}>
                                             {filteredAnalysisTypes.map(option => (
@@ -300,10 +310,10 @@ const FileManagerWidget = ({
                                             </select>
                                         )}
                                         <div className="fm-analysis-actions">
-                                            <button onClick={() => setAnalyzingFile(null)} disabled={isAnalyzingInProgress} className="fm-secondary-btn">Cancel</button>
                                             <button onClick={handleRunAnalysis} disabled={isAnalyzingInProgress} className="fm-primary-btn">
                                                 {isAnalyzingInProgress ? 'Analyzing...' : 'Run'}
                                             </button>
+                                            <button onClick={() => setAnalyzingFile(null)} disabled={isAnalyzingInProgress} className="fm-secondary-btn">Cancel</button>
                                         </div>
                                     </div>
                                 )}

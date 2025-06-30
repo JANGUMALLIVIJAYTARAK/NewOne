@@ -166,12 +166,10 @@ router.post('/', tempAuth, (req, res) => {
         // Ensure req.user exists after middleware execution
         if (!req.user) {
              console.error("!!! Upload handler: req.user not found after tempAuth.");
-             // Avoid sending detailed error to client
              return res.status(401).json({ message: "Authentication error during upload." });
         }
-        const userId = req.user._id.toString(); // Get userId here
-
-        // --- Handle Multer Errors ---
+        const userId = req.user._id.toString();
+    
         if (err) {
             console.error(`!!! Error during upload middleware for user ${req.user.username}:`, err);
             if (err instanceof multer.MulterError) {
@@ -179,74 +177,76 @@ router.post('/', tempAuth, (req, res) => {
                 if (err.code === 'LIMIT_FILE_SIZE') message = `File too large. Max: ${Math.round(MAX_FILE_SIZE / 1024 / 1024)} MB.`;
                 else if (err.code === 'LIMIT_UNEXPECTED_FILE') message = err.message || 'Invalid file type.';
                 else if (err.code === 'UNAUTHENTICATED') message = err.message || 'Authentication required.';
-                // Avoid exposing filesystem errors directly
                 return res.status(400).json({ message });
             } else {
-                // Handle other errors (e.g., filesystem errors from storage)
                 return res.status(500).json({ message: "Server error during upload preparation." });
             }
         }
-
-        // --- Handle No File Case ---
+    
         if (!req.file) {
-            // This case might happen if fileFilter rejected the file but didn't throw a MulterError handled above
             console.warn(`Upload request for User '${req.user.username}' completed, but req.file is missing (potentially filtered).`);
-            // Check if filter error message exists
-            const filterError = req.multerFilterError; // Check if filter attached an error
+            const filterError = req.multerFilterError;
             return res.status(400).json({ message: filterError?.message || "No valid file received or file type rejected." });
         }
-
+    
         // --- File Successfully Saved by Multer ---
-        const { path: filePath, originalname: originalName, filename: serverFilename } = req.file;
-        const absoluteFilePath = path.resolve(filePath); // Ensure absolute path
-
-        console.log(`<<< POST /api/upload successful for User '${req.user.username}'. File: ${serverFilename}.`);
-        console.log(`   Absolute path: ${absoluteFilePath}`);
-
-        // --- Extract topics from the uploaded file ---
+        const { path: filePath, originalname, filename: serverFilename } = req.file;
+        const absoluteFilePath = path.resolve(filePath);
+    
+        // ======================= THIS IS THE CRITICAL FIX =======================
+        // Sanitize the originalName ONCE. This regex is the same one multer uses internally.
+        // It will replace spaces and other invalid characters with an underscore.
+        const sanitizedOriginalName = originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+        // ========================================================================
+    
+        console.log(`<<< POST /api/upload successful for User '${req.user.username}'.`);
+        console.log(`   Original Name (Raw from upload): '${originalname}'`);
+        console.log(`   Original Name (Sanitized for use): '${sanitizedOriginalName}'`); // For debugging
+        console.log(`   Server Filename (Saved to disk): '${serverFilename}'`);
+    
+        // --- (Optional) Topic extraction can stay the same ---
         try {
             const pythonServiceUrl = process.env.PYTHON_AI_CORE_SERVICE_URL;
             if (pythonServiceUrl) {
+                // ... your topic extraction logic ...
                 const extractTopicsResponse = await axios.post(
                     `${pythonServiceUrl}/extract_topics_from_file`,
                     { file_path: absoluteFilePath }
                 );
                 if (extractTopicsResponse.data?.status === 'success') {
-                    console.log(`Extracted topics for ${originalName}:`, extractTopicsResponse.data.topics);
-                    // Optionally, save topics to DB or attach to file metadata here
+                    console.log(`Extracted topics for ${sanitizedOriginalName}:`, extractTopicsResponse.data.topics);
                 } else {
-                    console.warn(`Topic extraction failed for ${originalName}:`, extractTopicsResponse.data);
+                    console.warn(`Topic extraction failed for ${sanitizedOriginalName}:`, extractTopicsResponse.data);
                 }
-            } else {
-                console.warn('PYTHON_AI_CORE_SERVICE_URL not set, skipping topic extraction.');
             }
         } catch (topicErr) {
-            console.error(`Error extracting topics for ${originalName}:`, topicErr.message || topicErr);
+            // ...
+            console.error(`Error extracting topics for ${sanitizedOriginalName}:`, topicErr.message || topicErr);
         }
-
+    
         // --- Trigger Python processing asynchronously ---
-        // No await here, let the response go back quickly
-        triggerPythonRagProcessing(userId, absoluteFilePath, originalName)
+        // Pass the SANITIZED name to the Python service.
+        triggerPythonRagProcessing(userId, absoluteFilePath, sanitizedOriginalName) // ✅ USE THE SANITIZED NAME
             .then(ragResult => {
                 if (!ragResult.success) {
-                     console.error(`Background RAG processing failed for ${originalName} (User: ${userId}): ${ragResult.message}`);
-                     // Optional: Implement a mechanism to notify the user later or mark the file as unprocessed.
+                     console.error(`Background RAG processing failed for ${sanitizedOriginalName} (User: ${userId}): ${ragResult.message}`);
                 } else {
-                     console.log(`Background RAG processing initiated/completed for ${originalName} (User: ${userId}). Status: ${ragResult.status}, Details: ${JSON.stringify(ragResult.details)}`);
+                     console.log(`Background RAG processing initiated/completed for ${sanitizedOriginalName} (User: ${userId}). Status: ${ragResult.status}`);
                 }
             })
             .catch(error => {
-                 // Log errors from initiating the trigger itself (should be rare)
-                 console.error(`Error initiating background Python RAG processing for ${originalName}:`, error);
+                 console.error(`Error initiating background Python RAG processing for ${sanitizedOriginalName}:`, error);
             });
-
+    
         // --- Respond Immediately to the Client ---
+        // Send the SANITIZED name back to the frontend.
         res.status(200).json({
             message: "File uploaded successfully! Background processing started.",
-            filename: serverFilename, // Send back the generated server filename
-            originalname: originalName,
+            filename: serverFilename,
+            originalname: sanitizedOriginalName, // ✅ SEND THE SANITIZED NAME
         });
     });
+    
 });
 
 module.exports = router;
