@@ -3,7 +3,7 @@ import os
 import logging
 from abc import ABC, abstractmethod
 
-# --- SDK Imports ---
+# --- SDK Imports (No changes here) ---
 try:
     import google.generativeai as genai
     from google.generativeai.types import GenerationConfig
@@ -19,18 +19,16 @@ try:
 except ImportError:
     ChatOllama, HumanMessage, SystemMessage, AIMessage = None, None, None, None
 
-# --- Local Imports ---
+# --- Local Imports (No changes here) ---
 try:
     from . import config as service_config
 except ImportError:
     import config
 
 logger = logging.getLogger(__name__)
-
 ollama_available = bool(ChatOllama and HumanMessage)
 
-
-# --- Prompt Templates (Full versions for stability) ---
+# --- Prompt Templates (No changes here) ---
 _SYNTHESIS_PROMPT_TEMPLATE = """You are a helpful AI assistant. Your behavior depends entirely on whether 'CONTEXT' is provided.
 **RULE 1: ANSWER FROM CONTEXT**
 If the 'CONTEXT' section below is NOT empty, you MUST base your answer *only* on the information within that context.
@@ -50,7 +48,6 @@ If the 'CONTEXT' section below IS empty, you MUST act as a general knowledge ass
 ---
 EXECUTE NOW based on the rules.
 """
-
 _ANALYSIS_PROMPT_TEMPLATES = {
     "faq": """You are a data processing machine. Your only function is to extract questions and answers from the provided text.
 **CRITICAL RULES:**
@@ -76,7 +73,6 @@ Format the output as a numbered list. Example:
 --- END DOCUMENT TEXT ---
 EXECUTE NOW. CREATE THE MERMAID MIND MAP."""
 }
-
 _SUB_QUERY_TEMPLATE = """You are an AI assistant skilled at query decomposition. Your task is to break down a complex user question into {num_queries} simpler, self-contained sub-questions that can be answered independently by a search engine.
 **CRITICAL RULES:**
 1.  **ONLY OUTPUT THE QUESTIONS:** Do not include any preamble, numbering, or explanation.
@@ -87,7 +83,6 @@ _SUB_QUERY_TEMPLATE = """You are an AI assistant skilled at query decomposition.
 
 **SUB-QUESTIONS (One per line):**
 """
-
 _RELEVANCE_CHECK_PROMPT_TEMPLATE = """You are a relevance-checking AI. Your task is to determine if the provided 'CONTEXT' is useful for answering the 'USER QUERY'.
 Respond with only 'Yes' or 'No'. Do not provide any other explanation.
 
@@ -146,19 +141,30 @@ class GeminiHandler(BaseLLMHandler):
         gemini_key = self.api_keys.get('gemini')
         if not gemini_key: raise ValueError("Gemini API key not found.")
         genai.configure(api_key=gemini_key)
+    
+    # ==================== CHANGE 1: START ====================
+    # This method is now simpler and handles chat history correctly.
     def generate_response(self, prompt: str, is_chat: bool = True) -> str:
         system_instruction = self.kwargs.get('system_prompt') if is_chat else None
-        client = genai.GenerativeModel(self.model_name or os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-flash"),
+        
+        client = genai.GenerativeModel(
+            self.model_name or os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-flash"),
             generation_config=GenerationConfig(temperature=0.7),
-            system_instruction=system_instruction)
-        if is_chat:
-            history = self.kwargs.get('chat_history', [])
-            history_for_api = [{'role': 'user' if msg.get('role') == 'user' else 'model', 'parts': [msg.get('parts', [{}])[0].get('text', "")]} for msg in history if msg.get('parts', [{}])[0].get('text')]
-            chat_session = client.start_chat(history=history_for_api)
-            response = chat_session.send_message(prompt)
-        else:
-            response = client.generate_content(prompt)
+            system_instruction=system_instruction
+        )
+        
+        # Combine history with the current prompt
+        history = self.kwargs.get('chat_history', [])
+        history_for_api = [
+            {'role': 'user' if msg.get('role') == 'user' else 'model', 'parts': [part.get('text', "")]}
+            for msg in history 
+            for part in msg.get('parts', []) if part.get('text')
+        ]
+            
+        chat_session = client.start_chat(history=history_for_api)
+        response = chat_session.send_message(prompt)
         return response.text
+    # ==================== CHANGE 1: END ====================
 
 class GroqHandler(BaseLLMHandler):
     def _validate_sdk(self):
@@ -167,16 +173,31 @@ class GroqHandler(BaseLLMHandler):
         grok_key = self.api_keys.get('grok')
         if not grok_key: raise ValueError("Groq API key not found.")
         self.client = Groq(api_key=grok_key)
+
+    # ==================== CHANGE 2: START ====================
+    # This method now correctly assembles the message list for chat history.
     def generate_response(self, prompt: str, is_chat: bool = True) -> str:
         messages = []
-        if is_chat:
-            if system_prompt := self.kwargs.get('system_prompt'):
-                messages.append({"role": "system", "content": system_prompt})
-            history = self.kwargs.get('chat_history', [])
-            messages.extend([{'role': 'assistant' if msg.get('role') == 'model' else 'user', 'content': msg.get('parts', [{}])[0].get('text', "")} for msg in history])
+        if system_prompt := self.kwargs.get('system_prompt'):
+            messages.append({"role": "system", "content": system_prompt})
+        
+        history = self.kwargs.get('chat_history', [])
+        # Properly format history
+        for msg in history:
+            role = 'assistant' if msg.get('role') == 'model' else 'user'
+            content = " ".join([part.get('text', "") for part in msg.get('parts', [])])
+            if content:
+                messages.append({'role': role, 'content': content})
+        
+        # Add the current user message
         messages.append({"role": "user", "content": prompt})
-        completion = self.client.chat.completions.create(messages=messages, model=self.model_name or os.getenv("DEFAULT_GROQ_LLAMA3_MODEL", "llama3-8b-8192"))
+        
+        completion = self.client.chat.completions.create(
+            messages=messages,
+            model=self.model_name or os.getenv("DEFAULT_GROQ_LLAMA3_MODEL", "llama3-8b-8192")
+        )
         return completion.choices[0].message.content
+    # ==================== CHANGE 2: END ====================
 
 class OllamaHandler(BaseLLMHandler):
     def _validate_sdk(self):
@@ -184,16 +205,29 @@ class OllamaHandler(BaseLLMHandler):
     def _configure_client(self):
         host = self.kwargs.get('ollama_host') or self.api_keys.get("ollama_host") or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         self.client = ChatOllama(base_url=host, model=self.model_name or os.getenv("DEFAULT_OLLAMA_MODEL", "llama3"))
+
+    # ==================== CHANGE 3: START ====================
+    # This method now correctly assembles the Langchain message list.
     def generate_response(self, prompt: str, is_chat: bool = True) -> str:
         messages = []
-        if is_chat:
-            if system_prompt := self.kwargs.get('system_prompt'):
-                messages.append(SystemMessage(content=system_prompt))
-            history = self.kwargs.get('chat_history', [])
-            messages.extend([AIMessage(content=msg.get('parts', [{}])[0].get('text', "")) if msg.get('role') == 'model' else HumanMessage(content=msg.get('parts', [{}])[0].get('text', "")) for msg in history])
+        if system_prompt := self.kwargs.get('system_prompt'):
+            messages.append(SystemMessage(content=system_prompt))
+        
+        history = self.kwargs.get('chat_history', [])
+        for msg in history:
+            content = " ".join([part.get('text', "") for part in msg.get('parts', [])])
+            if content:
+                if msg.get('role') == 'model':
+                    messages.append(AIMessage(content=content))
+                else:
+                    messages.append(HumanMessage(content=content))
+        
+        # Add the current user message
         messages.append(HumanMessage(content=prompt))
+        
         response = self.client.invoke(messages)
         return response.content
+    # ==================== CHANGE 3: END ====================
 
 PROVIDER_MAP = {"gemini": GeminiHandler, "groq": GroqHandler, "ollama": OllamaHandler}
 
@@ -202,47 +236,29 @@ def get_handler(provider_name: str, **kwargs) -> BaseLLMHandler:
     if not handler_class: raise ValueError(f"Unsupported LLM provider: {provider_name}")
     return handler_class(**kwargs)
 
-# ==================================================================
-#  DEFINITIVE FIX: Correct the relevance check function
-# ==================================================================
 def check_context_relevance(query: str, context: str, **kwargs) -> bool:
-    """
-    Uses a fast LLM to check if the retrieved context is relevant to the user's query.
-    """
     logger.info("Performing relevance check on retrieved context...")
     try:
-        # Use a hardcoded, fast provider for the relevance check to prevent errors.
-        # We pass the api_keys from the original call.
         handler = get_handler(
             provider_name="groq", 
             api_keys=kwargs.get('api_keys', {}),
-            model_name="llama3-8b-8192" # Use a specific, fast model
+            model_name="llama3-8b-8192"
         )
-        
         prompt = _RELEVANCE_CHECK_PROMPT_TEMPLATE.format(query=query, context=context)
-        
-        # This is a utility task, not a chat. Set is_chat=False
         raw_response = handler.generate_response(prompt, is_chat=False)
-        
         decision = raw_response.strip().lower()
         logger.info(f"Relevance check decision: '{decision}'")
-        
-        # Check for 'yes' at the beginning of the string for robustness
         return decision.startswith('yes')
     except Exception as e:
         logger.error(f"Context relevance check failed: {e}. Defaulting to 'relevant'.")
-        # Default to true to avoid breaking the chain if the check fails.
         return True
-# ==================================================================
 
 def generate_sub_queries(original_query: str, llm_provider: str, num_queries: int = 3, **kwargs) -> list[str]:
-    """Generates sub-queries for multi-query RAG."""
     logger.info(f"Generating sub-queries for: '{original_query[:50]}...'")
     try:
         utility_kwargs = kwargs.copy()
         utility_kwargs.pop('chat_history', None)
         utility_kwargs.pop('system_prompt', None)
-
         handler = get_handler(provider_name=llm_provider, **utility_kwargs)
         prompt = _SUB_QUERY_TEMPLATE.format(original_query=original_query, num_queries=num_queries)
         raw_response = handler.generate_response(prompt, is_chat=False)
@@ -254,11 +270,37 @@ def generate_sub_queries(original_query: str, llm_provider: str, num_queries: in
         return []
 
 def generate_response(llm_provider: str, query: str, context_text: str, **kwargs) -> tuple[str, str | None]:
-    logger.info(f"Generating CHAT response with provider: {llm_provider}.")
+    """
+    This function is now ONLY for RAG-based responses.
+    """
+    logger.info(f"Generating RAG response with provider: {llm_provider}.")
     final_prompt = _SYNTHESIS_PROMPT_TEMPLATE.format(query=query, context_text=context_text)
     handler = get_handler(provider_name=llm_provider, **kwargs)
+    # The handlers will internally use chat_history if it's passed in kwargs
     raw_response = handler.generate_response(final_prompt, is_chat=True)
     return _parse_thinking_and_answer(raw_response)
+    
+# ==================== CHANGE 4: START ====================
+# ADD THIS NEW FUNCTION
+def generate_chat_response(llm_provider: str, query: str, **kwargs) -> tuple[str, str | None]:
+    """
+    Generates a direct conversational response using chat history, without the RAG template.
+    """
+    logger.info(f"Generating conversational (non-RAG) response with provider: {llm_provider}.")
+    
+    # We don't use the _SYNTHESIS_PROMPT_TEMPLATE here.
+    # The prompt is just the user's query.
+    # The full conversation context is built inside the handler from the 'chat_history' in kwargs.
+    
+    handler = get_handler(provider_name=llm_provider, **kwargs)
+    
+    # Call the handler. The handler will assemble the history and the new query.
+    raw_response = handler.generate_response(query, is_chat=True)
+    
+    # We don't expect "Thinking..." or "Answer:" formatting in a direct chat,
+    # so we return the raw response directly.
+    return raw_response, None
+# ==================== CHANGE 4: END ====================
 
 def perform_document_analysis(document_text: str, analysis_type: str, llm_provider: str, **kwargs) -> tuple[str | None, str | None]:
     logger.info(f"Performing '{analysis_type}' analysis with {llm_provider}.")
