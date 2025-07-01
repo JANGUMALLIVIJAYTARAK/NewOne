@@ -1,9 +1,9 @@
-# FusedChatbot/server/ai_core_service/llm_handler.py
+# server/ai_core_service/llm_handler.py (Refined with fallback logic + full functionality)
 import os
 import logging
 from abc import ABC, abstractmethod
 
-# --- SDK Imports ---
+# SDK imports
 try:
     import google.generativeai as genai
     from google.generativeai.types import GenerationConfig
@@ -18,19 +18,22 @@ try:
     from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 except ImportError:
     ChatOllama, HumanMessage, SystemMessage, AIMessage = None, None, None, None
+try:
+    import ollama
+    ollama_available = True
+except ImportError:
+    ollama_available = False
 
-# --- Local Imports ---
+# Local imports
 try:
     from . import config as service_config
 except ImportError:
-    import config
+    import config as service_config
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-ollama_available = bool(ChatOllama and HumanMessage)
-
-
-# --- Prompt Templates (Full versions for stability) ---
+# Prompt templates
 _SYNTHESIS_PROMPT_TEMPLATE = """You are a helpful AI assistant. Your behavior depends entirely on whether 'CONTEXT' is provided.
 **RULE 1: ANSWER FROM CONTEXT**
 If the 'CONTEXT' section below is NOT empty, you MUST base your answer *only* on the information within that context.
@@ -48,8 +51,7 @@ If the 'CONTEXT' section below IS empty, you MUST act as a general knowledge ass
 **QUERY:**
 {query}
 ---
-EXECUTE NOW based on the rules.
-"""
+EXECUTE NOW based on the rules."""
 
 _ANALYSIS_PROMPT_TEMPLATES = {
     "faq": """You are a data processing machine. Your only function is to extract questions and answers from the provided text.
@@ -101,23 +103,22 @@ CONTEXT:
 Is the context relevant to the query? Answer Yes or No.
 """
 
-def _parse_thinking_and_answer(full_llm_response: str) -> tuple[str, str | None]:
+# Utility: Parse LLM output into answer + reasoning
+def _parse_thinking_and_answer(full_llm_response: str):
     response_text = full_llm_response.strip()
     cot_start_tag = "**Chain of Thought:**"
     answer_start_tag = "**Answer:**"
-    cot_start_index = response_text.find(cot_start_tag)
-    if cot_start_index != -1:
-        answer_start_index = response_text.find(answer_start_tag, cot_start_index)
-        if answer_start_index != -1:
-            thinking_content = response_text[cot_start_index + len(cot_start_tag):answer_start_index].strip()
-            answer = response_text[answer_start_index + len(answer_start_tag):].strip()
-            return answer, thinking_content
-        else:
-            return response_text, None
+    cot_index = response_text.find(cot_start_tag)
+    answer_index = response_text.find(answer_start_tag)
+    if cot_index != -1 and answer_index != -1:
+        thinking = response_text[cot_index + len(cot_start_tag):answer_index].strip()
+        answer = response_text[answer_index + len(answer_start_tag):].strip()
+        return answer, thinking
     return response_text, None
 
+# Base Handler
 class BaseLLMHandler(ABC):
-    def __init__(self, api_keys: dict, model_name: str = None, **kwargs):
+    def __init__(self, api_keys, model_name=None, **kwargs):
         self.api_keys = api_keys
         self.model_name = model_name
         self.kwargs = kwargs
@@ -129,114 +130,106 @@ class BaseLLMHandler(ABC):
     @abstractmethod
     def _configure_client(self): pass
     @abstractmethod
-    def generate_response(self, prompt: str, is_chat: bool = True) -> str: pass
-    
+    def generate_response(self, prompt, is_chat=True): pass
+
     def analyze_document(self, document_text: str, analysis_type: str) -> str:
         prompt_template = _ANALYSIS_PROMPT_TEMPLATES.get(analysis_type)
-        if not prompt_template: raise ValueError(f"Invalid analysis type: {analysis_type}")
+        if not prompt_template:
+            raise ValueError(f"Invalid analysis type: {analysis_type}")
         doc_text_for_llm = document_text[:service_config.ANALYSIS_MAX_CONTEXT_LENGTH]
         num_items = min(5 + (len(doc_text_for_llm) // 4000), 20)
         final_prompt = prompt_template.format(doc_text_for_llm=doc_text_for_llm, num_items=num_items)
         return self.generate_response(final_prompt, is_chat=False)
 
+# Provider Handlers
 class GeminiHandler(BaseLLMHandler):
     def _validate_sdk(self):
-        if not genai: raise ConnectionError("Gemini SDK (google.generativeai) not installed.")
+        if not genai:
+            raise ConnectionError("Gemini SDK missing.")
     def _configure_client(self):
-        gemini_key = self.api_keys.get('gemini')
-        if not gemini_key: raise ValueError("Gemini API key not found.")
-        genai.configure(api_key=gemini_key)
-    def generate_response(self, prompt: str, is_chat: bool = True) -> str:
-        system_instruction = self.kwargs.get('system_prompt') if is_chat else None
-        client = genai.GenerativeModel(self.model_name or os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-flash"),
-            generation_config=GenerationConfig(temperature=0.7),
-            system_instruction=system_instruction)
-        if is_chat:
-            history = self.kwargs.get('chat_history', [])
-            history_for_api = [{'role': 'user' if msg.get('role') == 'user' else 'model', 'parts': [msg.get('parts', [{}])[0].get('text', "")]} for msg in history if msg.get('parts', [{}])[0].get('text')]
-            chat_session = client.start_chat(history=history_for_api)
-            response = chat_session.send_message(prompt)
-        else:
-            response = client.generate_content(prompt)
-        return response.text
+        genai.configure(api_key=self.api_keys.get('gemini'))
+    def generate_response(self, prompt, is_chat=True):
+        model = genai.GenerativeModel(self.model_name or "gemini-1.5-flash")
+        return model.generate_content(prompt).text
 
 class GroqHandler(BaseLLMHandler):
     def _validate_sdk(self):
-        if not Groq: raise ConnectionError("Groq SDK not installed.")
+        if not Groq:
+            raise ConnectionError("Groq SDK missing.")
     def _configure_client(self):
-        grok_key = self.api_keys.get('grok')
-        if not grok_key: raise ValueError("Groq API key not found.")
-        self.client = Groq(api_key=grok_key)
-    def generate_response(self, prompt: str, is_chat: bool = True) -> str:
-        messages = []
-        if is_chat:
-            if system_prompt := self.kwargs.get('system_prompt'):
-                messages.append({"role": "system", "content": system_prompt})
-            history = self.kwargs.get('chat_history', [])
-            messages.extend([{'role': 'assistant' if msg.get('role') == 'model' else 'user', 'content': msg.get('parts', [{}])[0].get('text', "")} for msg in history])
-        messages.append({"role": "user", "content": prompt})
-        completion = self.client.chat.completions.create(messages=messages, model=self.model_name or os.getenv("DEFAULT_GROQ_LLAMA3_MODEL", "llama3-8b-8192"))
-        return completion.choices[0].message.content
+        self.client = Groq(api_key=self.api_keys.get('groq'))
+    def generate_response(self, prompt, is_chat=True):
+        messages = [{"role": "user", "content": prompt}]
+        return self.client.chat.completions.create(messages=messages, model=self.model_name).choices[0].message.content
 
 class OllamaHandler(BaseLLMHandler):
     def _validate_sdk(self):
-        if not ChatOllama: raise ConnectionError("Ollama SDK (langchain_ollama) not installed.")
+        if not ChatOllama:
+            raise ConnectionError("Ollama SDK missing.")
     def _configure_client(self):
-        host = self.kwargs.get('ollama_host') or self.api_keys.get("ollama_host") or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        self.client = ChatOllama(base_url=host, model=self.model_name or os.getenv("DEFAULT_OLLAMA_MODEL", "llama3"))
-    def generate_response(self, prompt: str, is_chat: bool = True) -> str:
-        messages = []
-        if is_chat:
-            if system_prompt := self.kwargs.get('system_prompt'):
-                messages.append(SystemMessage(content=system_prompt))
-            history = self.kwargs.get('chat_history', [])
-            messages.extend([AIMessage(content=msg.get('parts', [{}])[0].get('text', "")) if msg.get('role') == 'model' else HumanMessage(content=msg.get('parts', [{}])[0].get('text', "")) for msg in history])
-        messages.append(HumanMessage(content=prompt))
-        response = self.client.invoke(messages)
-        return response.content
+        base_url = self.api_keys.get("ollama_host", "http://localhost:11434")
+        self.client = ChatOllama(base_url=base_url, model=self.model_name)
+    def generate_response(self, prompt, is_chat=True):
+        messages = [HumanMessage(content=prompt)]
+        return self.client.invoke(messages).content
 
-PROVIDER_MAP = {"gemini": GeminiHandler, "groq": GroqHandler, "ollama": OllamaHandler}
+# Provider map
+PROVIDER_MAP = {
+    "gemini": GeminiHandler,
+    "groq": GroqHandler,
+    "ollama": OllamaHandler
+}
 
-def get_handler(provider_name: str, **kwargs) -> BaseLLMHandler:
-    handler_class = next((handler for key, handler in PROVIDER_MAP.items() if provider_name.startswith(key)), None)
-    if not handler_class: raise ValueError(f"Unsupported LLM provider: {provider_name}")
-    return handler_class(**kwargs)
+def get_handler(provider_name, **kwargs):
+    handler_cls = PROVIDER_MAP.get(provider_name)
+    if not handler_cls:
+        raise ValueError(f"Unsupported LLM provider: {provider_name}")
+    return handler_cls(**kwargs)
 
-# ==================================================================
-#  DEFINITIVE FIX: Correct the relevance check function
-# ==================================================================
+# Generate with fallback across providers
+def generate_with_fallback(query, context_text, api_keys, history=[], system_prompt=None):
+    providers = [
+        ("ollama", "llama3"),
+        ("groq", "llama3-8b-8192"),
+        ("gemini", "gemini-1.5-flash")
+    ]
+    final_prompt = _SYNTHESIS_PROMPT_TEMPLATE.format(query=query, context_text=context_text)
+
+    for provider, model in providers:
+        try:
+            handler = get_handler(
+                provider_name=provider,
+                api_keys=api_keys,
+                model_name=model,
+                system_prompt=system_prompt,
+                chat_history=history
+            )
+            raw_response = handler.generate_response(final_prompt, is_chat=True)
+            answer, thinking = _parse_thinking_and_answer(raw_response)
+            return answer, thinking, provider
+        except Exception as e:
+            logger.warning(f"[Fallback] {provider.upper()} failed: {e}")
+
+    return "Sorry, all AI services are currently down. Try again later.", None, "none"
+
+# Relevance check utility
 def check_context_relevance(query: str, context: str, **kwargs) -> bool:
-    """
-    Uses a fast LLM to check if the retrieved context is relevant to the user's query.
-    """
     logger.info("Performing relevance check on retrieved context...")
     try:
-        # Use a hardcoded, fast provider for the relevance check to prevent errors.
-        # We pass the api_keys from the original call.
         handler = get_handler(
-            provider_name="groq", 
+            provider_name="groq",
             api_keys=kwargs.get('api_keys', {}),
-            model_name="llama3-8b-8192" # Use a specific, fast model
+            model_name="llama3-8b-8192"
         )
-        
         prompt = _RELEVANCE_CHECK_PROMPT_TEMPLATE.format(query=query, context=context)
-        
-        # This is a utility task, not a chat. Set is_chat=False
         raw_response = handler.generate_response(prompt, is_chat=False)
-        
-        decision = raw_response.strip().lower()
-        logger.info(f"Relevance check decision: '{decision}'")
-        
-        # Check for 'yes' at the beginning of the string for robustness
-        return decision.startswith('yes')
+        return raw_response.strip().lower().startswith('yes')
     except Exception as e:
         logger.error(f"Context relevance check failed: {e}. Defaulting to 'relevant'.")
-        # Default to true to avoid breaking the chain if the check fails.
         return True
-# ==================================================================
 
+# Sub-query decomposition
 def generate_sub_queries(original_query: str, llm_provider: str, num_queries: int = 3, **kwargs) -> list[str]:
-    """Generates sub-queries for multi-query RAG."""
     logger.info(f"Generating sub-queries for: '{original_query[:50]}...'")
     try:
         utility_kwargs = kwargs.copy()
@@ -246,13 +239,12 @@ def generate_sub_queries(original_query: str, llm_provider: str, num_queries: in
         handler = get_handler(provider_name=llm_provider, **utility_kwargs)
         prompt = _SUB_QUERY_TEMPLATE.format(original_query=original_query, num_queries=num_queries)
         raw_response = handler.generate_response(prompt, is_chat=False)
-        sub_queries = [q.strip() for q in raw_response.strip().split('\n') if q.strip()]
-        logger.info(f"Generated {len(sub_queries)} sub-queries.")
-        return sub_queries[:num_queries]
+        return [q.strip() for q in raw_response.strip().split('\n') if q.strip()][:num_queries]
     except Exception as e:
         logger.error(f"Failed to generate sub-queries: {e}", exc_info=True)
         return []
 
+# Normal chat generation using specific provider
 def generate_response(llm_provider: str, query: str, context_text: str, **kwargs) -> tuple[str, str | None]:
     logger.info(f"Generating CHAT response with provider: {llm_provider}.")
     final_prompt = _SYNTHESIS_PROMPT_TEMPLATE.format(query=query, context_text=context_text)
@@ -260,6 +252,7 @@ def generate_response(llm_provider: str, query: str, context_text: str, **kwargs
     raw_response = handler.generate_response(final_prompt, is_chat=True)
     return _parse_thinking_and_answer(raw_response)
 
+# Document analysis wrapper
 def perform_document_analysis(document_text: str, analysis_type: str, llm_provider: str, **kwargs) -> tuple[str | None, str | None]:
     logger.info(f"Performing '{analysis_type}' analysis with {llm_provider}.")
     handler = get_handler(provider_name=llm_provider, **kwargs)

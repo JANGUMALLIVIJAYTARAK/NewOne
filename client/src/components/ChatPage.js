@@ -234,28 +234,28 @@ const ChatPage = ({ setIsAuthenticated }) => {
         }
     }, [inputText, isLoading, messages, editableSystemPromptText, isRagEnabled, llmProvider, llmModelName, enableMultiQuery, resetTranscript, activeFile]);
     
-    // ==================================================================
-    //  START OF MODIFICATION
-    // ==================================================================
     const triggerFileRefresh = useCallback(() => {
         // This function is called by FileUploadWidget on a successful upload.
         setFileRefreshTrigger(p => p + 1); // Refreshes the file list in FileManagerWidget.
         setIsRagEnabled(true); // Automatically enable the RAG toggle.
         setHasFiles(true); // Assume we have files now, allowing RAG to be enabled.
+    
         // Auto-activate the most recently uploaded file
         getUserFiles().then(response => {
             const files = response.data || [];
             if (files.length > 0) {
-                // Sort by lastModified or just pick the last one
-                const latestFile = files.reduce((a, b) => (a.lastModified > b.lastModified ? a : b));
-                setActiveFile(latestFile.relativePath);
-                localStorage.setItem('activeFile', latestFile.relativePath);
+                // Sort to find the most recently added file. We assume the server returns a 'lastModified' or similar timestamp.
+                const latestFile = files.reduce((a, b) => (new Date(a.lastModified) > new Date(b.lastModified) ? a : b));
+                
+                // ==================== THE FIX ====================
+                // Use the originalName, not the relativePath, to set the active file.
+                console.log(`Auto-activating latest file: ${latestFile.originalName}`); // Add a log for debugging
+                setActiveFile(latestFile.originalName);
+                localStorage.setItem('activeFile', latestFile.originalName);
+                // ===============================================
             }
         });
-    }, []);
-    // ==================================================================
-    //  END OF MODIFICATION
-    // ==================================================================
+    }, []); // Empty dependency array is fine here.
 
     const handleNewChat = useCallback(() => { if (!isLoading) { resetTranscript(); saveAndReset(false); } }, [isLoading, saveAndReset, resetTranscript]);
     const handleEnterKey = useCallback((e) => { if (e.key === 'Enter' && !e.shiftKey && !isLoading) { e.preventDefault(); handleSendMessage(e); } }, [handleSendMessage, isLoading]);
