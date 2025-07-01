@@ -8,7 +8,8 @@ import remarkGfm from 'remark-gfm';
 import { jsPDF } from 'jspdf';
                  
 // --- Services & Configuration ---
-import { sendMessage, saveChatHistory, getUserFiles } from '../services/api';
+// ✅ 1. IMPORT getUserSettings at the top of the file
+import { sendMessage, saveChatHistory, getUserFiles, generateReport, getUserSettings } from '../services/api';
 import { LLM_OPTIONS } from '../config/constants';
 import { useTheme } from '../context/ThemeContext';
 
@@ -21,7 +22,7 @@ import AnalysisResultModal from './AnalysisResultModal';
 import VoiceInputButton from './VoiceInputButton';
 
 // --- Icons ---
-import { FiMessageSquare, FiDatabase, FiSettings, FiLogOut, FiSun, FiMoon, FiSend, FiPlus, FiArchive, FiShield, FiDownload } from 'react-icons/fi';
+import { FiFileText, FiMessageSquare, FiDatabase, FiSettings, FiLogOut, FiSun, FiMoon, FiSend, FiPlus, FiArchive, FiShield, FiDownload } from 'react-icons/fi'; // Add FiFileText
 
 // --- Styles ---
 import './ChatPage.css';
@@ -104,6 +105,11 @@ const ThemeToggleButton = () => {
 // ===================================================================================
 
 const ChatPage = ({ setIsAuthenticated }) => {
+    // State for report modal
+    const [isReportModalOpen, setIsReportModalOpen] = useState(false);
+    const [reportTopic, setReportTopic] = useState('');
+    const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+
     // --- State Management ---
     const [activeView, setActiveView] = useState('ASSISTANT');
     const [messages, setMessages] = useState([]);
@@ -137,36 +143,67 @@ const ChatPage = ({ setIsAuthenticated }) => {
         }
     }, [transcript, listening]);
 
-    // Move performLogoutCleanup above useEffect and useCallback hooks that use it
     const performLogoutCleanup = useCallback(() => {
         localStorage.clear();
         setIsAuthenticated(false);
         navigate('/login', { replace: true });
     }, [setIsAuthenticated, navigate]);
 
+    // ✅ 2. REPLACE THE ENTIRE useEffect HOOK for fetching user info with this new version
     useEffect(() => {
-        const fetchUserInfo = async () => {
+        const initializeApp = async () => {
             try {
+                // 1. Check for basic authentication details
                 const storedSessionId = localStorage.getItem('sessionId') || uuidv4();
                 if (!localStorage.getItem('sessionId')) {
                     localStorage.setItem('sessionId', storedSessionId);
                 }
                 setSessionId(storedSessionId);
-
+    
                 const userRole = localStorage.getItem('userRole');
                 const username = localStorage.getItem('username');
+    
                 if (!userRole || !username) {
+                    // If essential user info isn't present, they are not authenticated.
                     performLogoutCleanup();
                     return;
                 }
                 setUserRole(userRole);
                 setUsername(username);
+    
+                // 2. NEW ROBUST LOGIC: Always ensure API keys are loaded into storage.
+                // This fixes the issue for users who were approved by an admin while they were logged out.
+                const storedKeys = localStorage.getItem('userApiKeys');
+                if (!storedKeys || storedKeys === '{}') {
+                    console.log("API keys not found in browser storage. Attempting to fetch from server...");
+                    
+                    const settingsResponse = await getUserSettings();
+                    const settings = settingsResponse.data;
+    
+                    if (settings && (settings.geminiApiKey || settings.grokApiKey)) {
+                        const keysToStore = {
+                            gemini: settings.geminiApiKey,
+                            groq: settings.grokApiKey,
+                            ollama_host: settings.ollamaHost
+                        };
+                        localStorage.setItem('userApiKeys', JSON.stringify(keysToStore));
+                        console.log("Successfully fetched and stored API keys in localStorage.");
+                    } else {
+                        // This is normal for users who need to request access.
+                        console.warn("User is authenticated, but no API keys are set in their account settings.");
+                    }
+                } else {
+                    console.log("API keys found in browser storage. No fetch needed.");
+                }
+    
             } catch (error) {
-                performLogoutCleanup();
+                console.error("Error during app initialization:", error);
+                setError("Could not validate user settings. Some features may be unavailable.");
             }
         };
-        fetchUserInfo();
-    }, [navigate, setIsAuthenticated, performLogoutCleanup]);
+    
+        initializeApp();
+    }, [performLogoutCleanup]); // Dependency is simplified as it runs once on load
 
     const handlePromptSelectChange = useCallback((newId) => {
         setCurrentSystemPromptId(newId);
@@ -193,7 +230,7 @@ const ChatPage = ({ setIsAuthenticated }) => {
         setIsLoading(false);
         if (onCompleteCallback) onCompleteCallback();
 
-    }, [messages, handlePromptSelectChange]); // Remove performLogoutCleanup if not used inside
+    }, [messages, handlePromptSelectChange]);
     
     const handleLogout = useCallback(() => saveAndReset(true, performLogoutCleanup), [saveAndReset, performLogoutCleanup]);
 
@@ -235,27 +272,19 @@ const ChatPage = ({ setIsAuthenticated }) => {
     }, [inputText, isLoading, messages, editableSystemPromptText, isRagEnabled, llmProvider, llmModelName, enableMultiQuery, resetTranscript, activeFile]);
     
     const triggerFileRefresh = useCallback(() => {
-        // This function is called by FileUploadWidget on a successful upload.
-        setFileRefreshTrigger(p => p + 1); // Refreshes the file list in FileManagerWidget.
-        setIsRagEnabled(true); // Automatically enable the RAG toggle.
-        setHasFiles(true); // Assume we have files now, allowing RAG to be enabled.
-    
-        // Auto-activate the most recently uploaded file
+        setFileRefreshTrigger(p => p + 1);
+        setIsRagEnabled(true);
+        setHasFiles(true);
         getUserFiles().then(response => {
             const files = response.data || [];
             if (files.length > 0) {
-                // Sort to find the most recently added file. We assume the server returns a 'lastModified' or similar timestamp.
                 const latestFile = files.reduce((a, b) => (new Date(a.lastModified) > new Date(b.lastModified) ? a : b));
-                
-                // ==================== THE FIX ====================
-                // Use the originalName, not the relativePath, to set the active file.
-                console.log(`Auto-activating latest file: ${latestFile.originalName}`); // Add a log for debugging
+                console.log(`Auto-activating latest file: ${latestFile.originalName}`);
                 setActiveFile(latestFile.originalName);
                 localStorage.setItem('activeFile', latestFile.originalName);
-                // ===============================================
             }
         });
-    }, []); // Empty dependency array is fine here.
+    }, []);
 
     const handleNewChat = useCallback(() => { if (!isLoading) { resetTranscript(); saveAndReset(false); } }, [isLoading, saveAndReset, resetTranscript]);
     const handleEnterKey = useCallback((e) => { if (e.key === 'Enter' && !e.shiftKey && !isLoading) { e.preventDefault(); handleSendMessage(e); } }, [handleSendMessage, isLoading]);
@@ -300,6 +329,77 @@ const ChatPage = ({ setIsAuthenticated }) => {
         doc.save('chat_history.pdf');
     }, [messages, username]);
     
+    const handleGenerateReport = useCallback(async () => {
+        const topic = reportTopic.trim();
+        if (!topic) {
+            setError("Report topic cannot be empty.");
+            return;
+        }
+
+        setError(''); 
+        setIsGeneratingReport(true);
+        
+        // ======================= THE FINAL FIX =======================
+        // Replace the entire try...catch...finally block with this new version.
+        try {
+            const storedKeys = JSON.parse(localStorage.getItem('userApiKeys') || '{}');
+
+            if (!storedKeys.gemini && !storedKeys.groq) {
+                setError("Report Error: No API key for Gemini or Groq found in browser storage. Please check your settings.");
+                setIsGeneratingReport(false);
+                return;
+            }
+
+            const responseBlob = await generateReport(topic, storedKeys);
+
+            // Create a new Blob object from the response data with the correct MIME type
+            const pdfBlob = new Blob([responseBlob], { type: 'application/pdf' });
+
+            // Create a URL for the blob
+            const downloadUrl = window.URL.createObjectURL(pdfBlob);
+
+            // Create a temporary anchor element and set its properties
+            const link = document.createElement('a');
+            link.href = downloadUrl;
+            const safeFilename = topic.replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 50) + '_report.pdf';
+            link.setAttribute('download', safeFilename); // Set the filename for the download
+
+            // Append the link to the body, click it, and then remove it
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+
+            // Optional: Clean up the object URL after a short delay
+            setTimeout(() => window.URL.revokeObjectURL(downloadUrl), 100);
+
+            // Reset the UI state
+            setIsReportModalOpen(false);
+            setReportTopic('');
+
+        } catch (err) {
+            // This improved error handling can parse errors even from blob responses
+            let errorMessage = 'An unknown error occurred. Please check the server logs.';
+            if (err.response && err.response.data) {
+                if (err.response.data instanceof Blob && err.response.data.type === "application/json") {
+                    try {
+                        const errorJson = await err.response.data.text();
+                        const errorObj = JSON.parse(errorJson);
+                        errorMessage = errorObj.message || errorMessage;
+                    } catch (parseErr) {
+                        // Fallback if parsing the error blob fails
+                        errorMessage = "Failed to parse error response from server.";
+                    }
+                } else if (err.response.data.message) {
+                    errorMessage = err.response.data.message;
+                }
+            }
+            setError(`Report Error: ${errorMessage}`);
+        } finally {
+            setIsGeneratingReport(false);
+        }
+        // =============================================================
+    }, [reportTopic]); // The dependency is correct
+
     const handleFileSelect = useCallback((filePath) => {
         setActiveFile(filePath);
         localStorage.setItem('activeFile', filePath);
@@ -312,7 +412,7 @@ const ChatPage = ({ setIsAuthenticated }) => {
         isProcessing: isLoading, llmModelName, handleLlmModelChange,
         enableMultiQuery, handleMultiQueryToggle, isRagEnabled,
         triggerFileRefresh, refreshTrigger: fileRefreshTrigger, onAnalysisComplete,
-        setHasFiles, onFileSelect: handleFileSelect // Pass this down to FileManagerWidget
+        setHasFiles, onFileSelect: handleFileSelect
     };
 
     return (
@@ -325,6 +425,9 @@ const ChatPage = ({ setIsAuthenticated }) => {
                     <div className="header-controls">
                         <span className="username-display">Hi, {username}</span>
                         <ThemeToggleButton />
+                        <button onClick={() => setIsReportModalOpen(true)} className="header-button" title="Generate Report" disabled={isLoading || isGeneratingReport}>
+                            <FiFileText size={20} />
+                        </button>
                         <button onClick={handleHistory} className="header-button" title="Chat History" disabled={isLoading}><FiArchive size={20} /></button>
                         <button onClick={handleDownloadChat} className="header-button" title="Download Chat" disabled={messages.length === 0}><FiDownload size={20} /></button>
                         <button onClick={handleNewChat} className="header-button" title="New Chat" disabled={isLoading}><FiPlus size={20} /></button>
@@ -368,7 +471,6 @@ const ChatPage = ({ setIsAuthenticated }) => {
                     {isLoading && <div className="loading-indicator"><span>Thinking...</span></div>}
                     {!isLoading && error && <div className="error-indicator">{error}</div>}
                 </div>
-                {/* PDF Q&A warning */}
                 {inputText.match(/pdf|topics|headings|subheadings/i) && !activeFile && (
                     <div className="fm-error" style={{margin:'10px',textAlign:'center'}}>Please activate a file in the file manager to ask questions about a PDF.</div>
                 )}
@@ -386,6 +488,34 @@ const ChatPage = ({ setIsAuthenticated }) => {
             </div>
             <HistoryModal isOpen={isHistoryModalOpen} onClose={closeHistoryModal} onSessionSelect={handleSessionSelectForContinuation} />
             {analysisModalData && <AnalysisResultModal isOpen={isAnalysisModalOpen} onClose={closeAnalysisModal} analysisData={analysisModalData} />}
+
+            {isReportModalOpen && (
+                <div className="report-modal-overlay">
+                    <div className="report-modal-content">
+                        <h3>Generate New Report</h3>
+                        <p>Enter a topic, and the AI will perform a web search to generate a structured PDF report.</p>
+                        <input
+                            type="text"
+                            value={reportTopic}
+                            onChange={(e) => setReportTopic(e.target.value)}
+                            placeholder="e.g., The Future of Quantum Computing"
+                            disabled={isGeneratingReport}
+                            autoFocus
+                            onKeyDown={(e) => e.key === 'Enter' && handleGenerateReport()}
+                        />
+                        <div className="report-modal-actions">
+                            <button onClick={() => setIsReportModalOpen(false)} disabled={isGeneratingReport} className="secondary-button">
+                                Cancel
+                            </button>
+                            <button onClick={handleGenerateReport} disabled={isGeneratingReport || !reportTopic.trim()} className="primary-button">
+                                {isGeneratingReport ? 'Generating...' : 'Generate PDF'}
+                            </button>
+                        </div>
+                        {isGeneratingReport && <div className="loading-indicator" style={{ marginTop: '10px' }}><span>Gathering sources and writing report... This may take a few minutes.</span></div>}
+                        {error && <div className="error-indicator" style={{ marginTop: '10px' }}>{error}</div>}
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

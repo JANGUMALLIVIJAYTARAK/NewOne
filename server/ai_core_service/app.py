@@ -83,6 +83,58 @@ def analyze_document_route():
         return create_error_response(f"Failed to perform analysis: {str(e)}", 500)
 
 
+@app.route('/generate_report', methods=['POST'])
+def generate_report_route():
+    """
+    Endpoint to generate a full report on a given topic.
+    This is a multi-step process:
+    1. Perform a web search to gather up-to-date context.
+    2. Use an LLM to synthesize the context into a structured Markdown report.
+    """
+    data = request.get_json()
+    logger.info(f"--- DEBUG: Full payload received by Python: {data} ---")
+    
+    if not data or 'topic' not in data:
+        return create_error_response("Request body must be JSON and contain a 'topic' field.", 400)
+    
+    topic = data['topic']
+    logger.info(f"Received request to generate report for topic: '{topic}'")
+
+    try:
+        # 1. Gather rich context using the existing web search tool
+        logger.info(f"Performing web search for report context...")
+        # ✅ THE FIX: The call to perform_search is now correct
+        context_text = web_search.perform_search(topic, max_results=10)
+
+        # ✅ THE FIX: This logic is now correctly placed within the try block
+        if not context_text or not context_text.strip():
+            logger.warning(f"Web search returned no results for topic: '{topic}'")
+            return create_error_response(f"Could not find sufficient information on the topic '{topic}' to generate a report.", 404)
+
+        logger.info(f"Web search successful. Synthesizing report from {len(context_text)} characters of context.")
+
+        # 2. Call the new handler function to generate the report from the context
+        report_markdown = llm_handler.generate_report_from_text(
+            topic=topic,
+            context_text=context_text,
+            api_keys=data.get('api_keys', {}),
+            llm_provider=data.get('llm_provider', 'gemini'),
+            model_name=data.get('llm_model_name')
+        )
+        
+        if not report_markdown:
+            logger.error("Report generation returned empty content.")
+            raise ValueError("The AI model failed to generate the report structure.")
+
+        logger.info(f"Successfully generated Markdown report for topic: '{topic}'")
+        return jsonify({"status": "success", "report_markdown": report_markdown})
+
+    except Exception as e:
+        # This single catch block will now correctly handle all errors
+        logger.error(f"An unexpected error occurred during report generation for topic '{topic}': {e}", exc_info=True)
+        return create_error_response(f"An internal error occurred: {e}", 500)
+
+
 @app.route('/generate_chat_response', methods=['POST'])
 def generate_chat_response_route():
     logger.info("\n--- Received request at /generate_chat_response ---")

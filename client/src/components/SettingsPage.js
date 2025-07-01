@@ -47,6 +47,17 @@ const SettingsPage = () => {
         setSuccessMessage('');
         try {
             await saveUserSettings(settings);
+            
+            // ======================= THE FINAL FIX =======================
+            // After successfully saving to the backend, also save the keys
+            // to localStorage so other components can access them immediately.
+            localStorage.setItem('userApiKeys', JSON.stringify({
+                gemini: settings.geminiApiKey,
+                groq: settings.grokApiKey, // Use 'groq' to match llm_handler.py
+                ollama_host: settings.ollamaHost
+            }));
+            // =============================================================
+            
             setSuccessMessage('Settings saved successfully!');
             setTimeout(() => setSuccessMessage(''), 3000);
         } catch (err) {
@@ -75,7 +86,7 @@ const SettingsPage = () => {
                     </div>
                     <div className="input-group">
                         <label htmlFor="grokApiKey">Grok API Key</label>
-                        <input id="grokApiKey" name="grokApiKey" type="password" value={settings.grokApiKey} onChange={handleChange} placeholder="Enter your Grok API Key" disabled={saving} />
+                        <input id="grokApiKey" name="grokApiKey" type="password" value={settings.grokApiKey} onChange={handleChange} placeholder="Enter your Groq API Key" disabled={saving} />
                     </div>
                     <div className="input-group">
                         <label htmlFor="ollamaHost">Custom Ollama Host (Optional)</label>

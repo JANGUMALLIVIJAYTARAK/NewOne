@@ -96,6 +96,31 @@ CONTEXT:
 Is the context relevant to the query? Answer Yes or No.
 """
 
+# ✅ 1. ADD THIS NEW PROMPT TEMPLATE at the top with your other templates.
+# This template is highly structured to ensure consistent report quality.
+_REPORT_GENERATION_PROMPT_TEMPLATE = """You are a professional research analyst and technical writer. Your sole task is to generate a comprehensive, well-structured report on a given topic. You must base your report *exclusively* on the provided context from web search results.
+
+**CRITICAL RULES:**
+1.  **Strictly Use Context:** You MUST base your entire report on the information found in the "SEARCH RESULTS CONTEXT" section below. Do not use any external or prior knowledge.
+2.  **Markdown Formatting:** The entire output MUST be in valid, clean Markdown format. Use headings (e.g., `#`, `##`, `###`), bold text, bullet points, and numbered lists to create a readable and professional document.
+3.  **Report Structure:** The report must follow this exact structure, section by section:
+    - A main title: `# Report: {topic}`
+    - `## 1. Executive Summary`: A brief, high-level paragraph summarizing the most critical aspects of the topic and the key conclusions of the report.
+    - `## 2. Key Findings`: A bulleted list that concisely presents the most important points, data, or facts discovered in the context (aim for 3-5 distinct bullet points).
+    - `## 3. Detailed Analysis`: A more in-depth section expanding on the key findings. This should be the longest part of the report. Use subheadings (e.g., `### Sub-Topic 1`, `### Sub-Topic 2`) for clarity and to organize different facets of the analysis.
+    - `## 4. Conclusion`: A concluding paragraph that summarizes the analysis and provides a final, overarching takeaway.
+    - `## 5. Sources Used`: A numbered list of the sources from the context that were used to build the report. You MUST cite which information came from which source in the analysis section using footnotes like `[1]`, `[2]`, etc.
+
+---
+**SEARCH RESULTS CONTEXT:**
+{context_text}
+---
+**TOPIC TO REPORT ON:**
+{topic}
+---
+GENERATE THE MARKDOWN REPORT NOW.
+"""
+
 def _parse_thinking_and_answer(full_llm_response: str) -> tuple[str, str | None]:
     response_text = full_llm_response.strip()
     cot_start_tag = "**Chain of Thought:**"
@@ -170,7 +195,7 @@ class GroqHandler(BaseLLMHandler):
     def _validate_sdk(self):
         if not Groq: raise ConnectionError("Groq SDK not installed.")
     def _configure_client(self):
-        grok_key = self.api_keys.get('grok')
+        grok_key = self.api_keys.get('groq')
         if not grok_key: raise ValueError("Groq API key not found.")
         self.client = Groq(api_key=grok_key)
 
@@ -307,3 +332,31 @@ def perform_document_analysis(document_text: str, analysis_type: str, llm_provid
     handler = get_handler(provider_name=llm_provider, **kwargs)
     analysis_result = handler.analyze_document(document_text, analysis_type)
     return analysis_result, None
+
+# ✅ 2. ADD THIS ENTIRE NEW FUNCTION at the end of the file.
+# This function is self-contained and will not affect other operations.
+def generate_report_from_text(topic: str, context_text: str, **kwargs) -> str:
+    """
+    Uses an LLM to synthesize a report from a given context text.
+    """
+    logger.info(f"Synthesizing Markdown report for topic: '{topic}'")
+    report_kwargs = kwargs.copy()
+    
+    # ======================= THE CHANGE =======================
+    # SWITCH THE DEFAULT PROVIDER TO GROQ FOR THIS TASK
+    provider = report_kwargs.get('llm_provider', 'groq') # Changed from 'gemini'
+    # Set a default model for Groq
+    default_model = 'llama3-8b-8192' 
+    # ==========================================================
+    
+    handler = get_handler(
+        provider_name=provider,
+        api_keys=report_kwargs.get('api_keys', {}),
+        model_name=report_kwargs.get('model_name', default_model)
+    )
+    
+    prompt = _REPORT_GENERATION_PROMPT_TEMPLATE.format(topic=topic, context_text=context_text)
+    report_markdown = handler.generate_response(prompt, is_chat=False)
+    
+    logger.info("Markdown report content generated successfully.")
+    return report_markdown
