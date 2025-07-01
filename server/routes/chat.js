@@ -78,7 +78,7 @@ router.post('/message', tempAuth, async (req, res) => {
     // ==================================================================
 
     const {
-        message, history, sessionId, systemPrompt, isRagEnabled, llmProvider, llmModelName, enableMultiQuery, activeFile
+        message, history, sessionId, systemPrompt, isRagEnabled, llmProvider, llmModelName, enableMultiQuery, activeFile, showReasoning // <-- added showReasoning
     } = req.body;
     const userId = req.user._id.toString();
 
@@ -92,6 +92,28 @@ router.post('/message', tempAuth, async (req, res) => {
 
     // === New logic: If user asks for topics/summary and a file is present, extract headings/subheadings ===
     let extractedHeadings = null;
+    let chunksAdded = 0;
+    let filePath, metaPath;
+    if (activeFile) {
+        const userAssetsDir = path.join(__dirname, '..', 'assets', req.user.username.replace(/[^a-zA-Z0-9_-]/g, '_'));
+        filePath = path.join(userAssetsDir, activeFile);
+        metaPath = filePath + '.meta.json';
+        if (fs.existsSync(metaPath)) {
+            try {
+                const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+                chunksAdded = meta.chunks_added || 0;
+            } catch (err) {
+                console.warn('Could not read PDF metadata:', err.message);
+            }
+        }
+    }
+    // Safeguard: If PDF already processed, skip extraction
+    if (chunksAdded > 0) {
+        console.log(`PDF ${activeFile} already processed (chunks_added=${chunksAdded}), skipping extraction.`);
+        // You can add your vector DB retrieval logic here if needed
+        return res.status(200).json({ message: `PDF already processed, skipping extraction.`, chunks_added: chunksAdded });
+    }
+    // ...existing code...
     if (activeFile && typeof message === 'string' && /(topics|summary|headings|subheadings)/i.test(message)) {
         try {
             // Assume activeFile is a relative path like 'docs/1751045132926-Chapter5.pdf'
@@ -168,9 +190,15 @@ router.post('/message', tempAuth, async (req, res) => {
         const isKnowledgeCheck = systemPrompt?.includes(KNOWLEDGE_CHECK_IDENTIFIER) && history?.length === 0;
         const performRagRequest = !isKnowledgeCheck && !!isRagEnabled;
 
+        // --- Chain-of-Thought Reasoning ---
+        let finalPrompt = message.trim();
+        if (showReasoning) {
+            finalPrompt = `${finalPrompt}\n\nPlease show your step-by-step reasoning before giving the final answer. Use a clear chain-of-thought format.`;
+        }
+
         const pythonPayload = {
             user_id: userId,
-            query: message.trim(),
+            query: finalPrompt,
             chat_history: history || [],
             llm_provider: llmProvider,
             llm_model_name: llmModelName || null,
@@ -194,7 +222,7 @@ router.post('/message', tempAuth, async (req, res) => {
             parts: [{ text: pythonResponse.data.llm_response || "[No response text from AI]" }],
             timestamp: new Date(),
             references: pythonResponse.data.references || [],
-            thinking: pythonResponse.data.thinking_content || null,
+            thinking: pythonResponse.data.thinking_content || null, // <-- LLM's reasoning
             provider: pythonResponse.data.provider_used,
             model: pythonResponse.data.model_used,
             context_source: pythonResponse.data.context_source

@@ -272,19 +272,24 @@ const ChatPage = ({ setIsAuthenticated }) => {
     }, [inputText, isLoading, messages, editableSystemPromptText, isRagEnabled, llmProvider, llmModelName, enableMultiQuery, resetTranscript, activeFile]);
     
     const triggerFileRefresh = useCallback(() => {
-        setFileRefreshTrigger(p => p + 1);
-        setIsRagEnabled(true);
-        setHasFiles(true);
+        // This function is called by FileUploadWidget on a successful upload.
+        setFileRefreshTrigger(p => p + 1); // Refreshes the file list in FileManagerWidget.
+        setIsRagEnabled(true); // Automatically enable the RAG toggle.
+        setHasFiles(true); // Assume we have files now, allowing RAG to be enabled.
+        // Auto-activate the most recently uploaded file
         getUserFiles().then(response => {
             const files = response.data || [];
             if (files.length > 0) {
-                const latestFile = files.reduce((a, b) => (new Date(a.lastModified) > new Date(b.lastModified) ? a : b));
-                console.log(`Auto-activating latest file: ${latestFile.originalName}`);
-                setActiveFile(latestFile.originalName);
-                localStorage.setItem('activeFile', latestFile.originalName);
+                // Sort by lastModified or just pick the last one
+                const latestFile = files.reduce((a, b) => (a.lastModified > b.lastModified ? a : b));
+                setActiveFile(latestFile.relativePath);
+                localStorage.setItem('activeFile', latestFile.relativePath);
             }
         });
     }, []);
+    // ==================================================================
+    //  END OF MODIFICATION
+    // ==================================================================
 
     const handleNewChat = useCallback(() => { if (!isLoading) { resetTranscript(); saveAndReset(false); } }, [isLoading, saveAndReset, resetTranscript]);
     const handleEnterKey = useCallback((e) => { if (e.key === 'Enter' && !e.shiftKey && !isLoading) { e.preventDefault(); handleSendMessage(e); } }, [handleSendMessage, isLoading]);
