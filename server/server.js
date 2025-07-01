@@ -25,6 +25,10 @@ const { getLocalIPs } = require('./utils/networkUtils');
 const { performAssetCleanup } = require('./utils/assetCleanup');
 const User = require('./models/User');
 
+// ✅ 1. Add this line to import your new route file
+const generationRoutes = require('./routes/generation');
+
+
 // --- Constants & Configuration ---
 const DEFAULT_PORT = 5000;
 const DEFAULT_MONGO_URI = 'mongodb://localhost:27017/chatbotGeminiDB6';
@@ -56,6 +60,10 @@ app.use('/api/syllabus', require('./routes/syllabus'));
 app.use('/api/analysis', require('./routes/analysis'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/admin', require('./routes/admin'));
+
+// ✅ 2. Add this line to register the new route
+app.use('/api/generation', generationRoutes);
+
 
 // --- Global Error Handler ---
 app.use((err, req, res, next) => {

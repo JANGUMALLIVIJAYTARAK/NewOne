@@ -215,10 +215,12 @@
 // }
 
 // export default AuthPage;
+// client/src/components/AuthPage.js
 
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { signinUser, signupUser, saveUserSettings, requestAdminKeyAccess } from '../services/api';
+// ✅ 1. IMPORT THE getUserSettings FUNCTION
+import { signinUser, signupUser, saveUserSettings, requestAdminKeyAccess, getUserSettings } from '../services/api';
 import ApiKeyModal from './ApiKeyModal';
 
 /**
@@ -278,8 +280,31 @@ const AuthPage = ({ setIsAuthenticated }) => {
             if (needsApiKeyPrompt) {
                 setCurrentStep('apiKeys');
             } else {
-                setIsAuthenticated(true);
-                navigate('/chat', { replace: true });
+                // ======================= THE FINAL FIX =======================
+                // This user doesn't need the prompt, meaning they are an admin
+                // or have been approved. We MUST fetch their settings to get the keys.
+                console.log("User does not need API key prompt. Fetching settings...");
+                try {
+                    const settingsResponse = await getUserSettings();
+                    const settings = settingsResponse.data;
+                    
+                    // Save the fetched keys to localStorage so other components can use them.
+                    localStorage.setItem('userApiKeys', JSON.stringify({
+                        gemini: settings.geminiApiKey,
+                        groq: settings.grokApiKey,
+                        ollama_host: settings.ollamaHost
+                    }));
+
+                    console.log("Settings and API keys loaded into localStorage.");
+
+                    setIsAuthenticated(true);
+                    navigate('/chat', { replace: true });
+
+                } catch (settingsErr) {
+                    // If fetching settings fails, we can't proceed.
+                    throw new Error("Successfully logged in, but failed to fetch API key settings.");
+                }
+                // =============================================================
             }
         } catch (err) {
             setError(err.response?.data?.message || err.message || 'An error occurred.');

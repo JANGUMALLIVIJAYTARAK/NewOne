@@ -83,6 +83,58 @@ def analyze_document_route():
         return create_error_response(f"Failed to perform analysis: {str(e)}", 500)
 
 
+@app.route('/generate_report', methods=['POST'])
+def generate_report_route():
+    """
+    Endpoint to generate a full report on a given topic.
+    This is a multi-step process:
+    1. Perform a web search to gather up-to-date context.
+    2. Use an LLM to synthesize the context into a structured Markdown report.
+    """
+    data = request.get_json()
+    logger.info(f"--- DEBUG: Full payload received by Python: {data} ---")
+    
+    if not data or 'topic' not in data:
+        return create_error_response("Request body must be JSON and contain a 'topic' field.", 400)
+    
+    topic = data['topic']
+    logger.info(f"Received request to generate report for topic: '{topic}'")
+
+    try:
+        # 1. Gather rich context using the existing web search tool
+        logger.info(f"Performing web search for report context...")
+        # ✅ THE FIX: The call to perform_search is now correct
+        context_text = web_search.perform_search(topic, max_results=10)
+
+        # ✅ THE FIX: This logic is now correctly placed within the try block
+        if not context_text or not context_text.strip():
+            logger.warning(f"Web search returned no results for topic: '{topic}'")
+            return create_error_response(f"Could not find sufficient information on the topic '{topic}' to generate a report.", 404)
+
+        logger.info(f"Web search successful. Synthesizing report from {len(context_text)} characters of context.")
+
+        # 2. Call the new handler function to generate the report from the context
+        report_markdown = llm_handler.generate_report_from_text(
+            topic=topic,
+            context_text=context_text,
+            api_keys=data.get('api_keys', {}),
+            llm_provider=data.get('llm_provider', 'gemini'),
+            model_name=data.get('llm_model_name')
+        )
+        
+        if not report_markdown:
+            logger.error("Report generation returned empty content.")
+            raise ValueError("The AI model failed to generate the report structure.")
+
+        logger.info(f"Successfully generated Markdown report for topic: '{topic}'")
+        return jsonify({"status": "success", "report_markdown": report_markdown})
+
+    except Exception as e:
+        # This single catch block will now correctly handle all errors
+        logger.error(f"An unexpected error occurred during report generation for topic '{topic}': {e}", exc_info=True)
+        return create_error_response(f"An internal error occurred: {e}", 500)
+
+
 @app.route('/generate_chat_response', methods=['POST'])
 def generate_chat_response_route():
     logger.info("\n--- Received request at /generate_chat_response ---")
@@ -93,42 +145,40 @@ def generate_chat_response_route():
     if not user_id or not current_user_query:
         return create_error_response("Missing user_id or query in request", 400)
 
-    # --- KG Integration: Extract entities/relations from user query and context ---
+    # KG Integration, Routing, and Handler setup (No changes needed here)
     kg_entities = kg_service.extract_entities_and_relations(current_user_query)
     kg_facts = kg_service.query_kg(current_user_query)
     kg_context = f"\n[KG Entities]: {kg_entities}\n[KG Facts]: {kg_facts}\n"
-
     routing_decision = llm_router.route_query(current_user_query, data.get('llm_provider', config.DEFAULT_LLM_PROVIDER), data.get('llm_model_name'))
     final_provider = routing_decision['provider']
     final_model = routing_decision['model']
     logger.info(f"Router decision: Provider='{final_provider}', Model='{final_model}'")
-
     handler_kwargs = {
         'api_keys': data.get('api_keys', {}), 'model_name': final_model,
         'chat_history': data.get('chat_history', []), 'system_prompt': data.get('system_prompt'),
         'ollama_host': data.get('ollama_host')
     }
 
-    context_text_for_llm = "No relevant context was found from any source."
+    # Initialize variables
+    context_text_for_llm = "" # Start with empty context
     rag_references_for_client = []
-    context_source = "None" 
+    context_source = "None"
+    final_answer = ""
+    thinking_content = None
 
+    # This is the main RAG and response generation logic block
     perform_rag = data.get('perform_rag', True)
     if perform_rag:
-        # --- Multi-Query RAG Search ---
+        # --- Multi-Query RAG Search (No changes here) ---
         logger.info("Performing multi-query RAG search on local documents...")
         queries_to_search = [current_user_query]
         if data.get('enable_multi_query', True):
             try:
-                sub_queries = llm_handler.generate_sub_queries(
-                    original_query=current_user_query,
-                    llm_provider=final_provider,
-                    **handler_kwargs
-                )
+                sub_queries = llm_handler.generate_sub_queries(original_query=current_user_query, llm_provider=final_provider, **handler_kwargs)
                 if sub_queries: queries_to_search.extend(sub_queries)
             except Exception as e:
                 logger.error(f"Error during sub-query generation: {e}", exc_info=True)
-
+        
         unique_chunks = set()
         docs_for_context = []
         for q in queries_to_search:
@@ -138,67 +188,81 @@ def generate_chat_response_route():
                     unique_chunks.add(doc.page_content)
                     docs_for_context.append((doc, score))
         
-        # --- Relevance Check and Web Search Fallback ---
+        # --- Relevance Check and Web Search Fallback (No changes here) ---
         is_relevant = False
         if docs_for_context:
             temp_context = "\n\n".join([doc.page_content for doc, score in docs_for_context])
             is_relevant = llm_handler.check_context_relevance(current_user_query, temp_context, **handler_kwargs)
 
         if docs_for_context and is_relevant:
-            logger.info(f"Found {len(docs_for_context)} RELEVANT document chunks.")
+            logger.info(f"Found {len(docs_for_context)} RELEVANT document chunks. Using RAG response function.")
             context_parts = [f"[{i+1}] Source: {d.metadata.get('documentName')}\n{d.page_content}" for i, (d, s) in enumerate(docs_for_context)]
             context_text_for_llm = "\n\n---\n\n".join(context_parts)
             rag_references_for_client = [{"documentName": d.metadata.get("documentName"), "score": float(s)} for d, s in docs_for_context]
             context_source = "Local Documents"
-        else:
+            
+            # ✅ USE THE RAG-SPECIFIC RESPONSE FUNCTION
+            final_answer, thinking_content = llm_handler.generate_response(
+                llm_provider=final_provider, query=current_user_query, context_text=context_text_for_llm, **handler_kwargs
+            )
+
+        else: # This block handles cases where no relevant docs were found
             if docs_for_context:
-                logger.info("Local documents found, but they were NOT RELEVANT to the query. Falling back to web search.")
+                logger.info("Local documents found, but they were NOT RELEVANT to the query.")
             else:
-                logger.info("No relevant local documents found. Not falling back to web search if active_file is set.")
-                # If user asked about a PDF and no content was found, warn the user
-                if data.get('active_file'):
-                    return jsonify({
-                        "llm_response": "[No content found for the selected PDF. Please check if the file was indexed correctly or try re-uploading.]",
-                        "references": [],
-                        "thinking_content": None,
-                        "status": "success",
-                        "provider_used": final_provider,
-                        "model_used": final_model,
-                        "context_source": "PDF (not found)",
-                        "kg_entities": kg_entities,
-                        "kg_facts": kg_facts
-                    }), 200
-            try:
-                web_context = web_search.perform_search(current_user_query)
-                if web_context:
-                    context_text_for_llm = web_context
-                    context_source = "Web Search"
-            except Exception as e:
-                logger.error(f"Web search failed: {e}", exc_info=True)
-    # --- Compose system prompt with KG context ---
-    orig_system_prompt = data.get('system_prompt') or "You are a helpful assistant."
-    system_prompt = f"{orig_system_prompt}\n{kg_context}"
-    try:
-        logger.info(f"Calling final LLM provider: {final_provider} with context from: {context_source}")
-        final_answer, thinking_content = llm_handler.generate_response(
-            llm_provider=final_provider,
-            query=current_user_query,
-            context_text=context_text_for_llm,
-            **handler_kwargs
+                logger.info("No relevant local documents found.")
+            
+            # Special case for "no content found" message
+            if data.get('active_file') and not docs_for_context:
+                logger.info("Active file was selected, but no content found. Returning specific message.")
+                final_answer = "[No content found for the selected PDF. Please check if the file was indexed correctly or try re-uploading.]"
+                context_source = "PDF (not found)"
+            else:
+                # Fallback to web search OR direct chat
+                logger.info("Attempting web search fallback...")
+                try:
+                    web_context = web_search.perform_search(current_user_query)
+                    if web_context:
+                        logger.info("Web search found relevant context. Using RAG response function.")
+                        context_text_for_llm = web_context
+                        context_source = "Web Search"
+                        # ✅ USE THE RAG-SPECIFIC RESPONSE FUNCTION
+                        final_answer, thinking_content = llm_handler.generate_response(
+                            llm_provider=final_provider, query=current_user_query, context_text=context_text_for_llm, **handler_kwargs
+                        )
+                    else:
+                        # If web search also fails, use the new direct chat function
+                        logger.info("Web search found no context. Using direct conversational function.")
+                        # ✅ USE THE NEW CONVERSATIONAL RESPONSE FUNCTION
+                        final_answer, thinking_content = llm_handler.generate_chat_response(
+                            llm_provider=final_provider, query=current_user_query, **handler_kwargs
+                        )
+                except Exception as e:
+                    logger.error(f"Web search failed: {e}", exc_info=True)
+                    # If web search throws an error, fall back to direct chat
+                    logger.info("Web search failed. Using direct conversational function as final fallback.")
+                    # ✅ USE THE NEW CONVERSATIONAL RESPONSE FUNCTION
+                    final_answer, thinking_content = llm_handler.generate_chat_response(
+                        llm_provider=final_provider, query=current_user_query, **handler_kwargs
+                    )
+
+    else: # This block runs if RAG is disabled entirely
+        logger.info("RAG is disabled. Using direct conversational function.")
+        # ✅ USE THE NEW CONVERSATIONAL RESPONSE FUNCTION
+        final_answer, thinking_content = llm_handler.generate_chat_response(
+            llm_provider=final_provider, query=current_user_query, **handler_kwargs
         )
-        return jsonify({
-            "llm_response": final_answer, "references": rag_references_for_client,
-            "thinking_content": thinking_content, "status": "success",
-            "provider_used": final_provider, "model_used": final_model,
-            "context_source": context_source,
-            "kg_entities": kg_entities,
-            "kg_facts": kg_facts
-        }), 200
-    except (ConnectionError, ValueError) as e:
-        return create_error_response(str(e), 502)
-    except Exception as e:
-        logger.error(f"Unhandled exception in generate_chat_response: {e}", exc_info=True)
-        return create_error_response(f"Failed to generate chat response: {str(e)}", 500)
+
+    # --- Final Response to Client (No changes here) ---
+    return jsonify({
+        "llm_response": final_answer, "references": rag_references_for_client,
+        "thinking_content": thinking_content, "status": "success",
+        "provider_used": final_provider, "model_used": final_model,
+        "context_source": context_source,
+        "kg_entities": kg_entities,
+        "kg_facts": kg_facts
+    }), 200
+
 
 @app.route('/chat', methods=['POST'])
 def chat():

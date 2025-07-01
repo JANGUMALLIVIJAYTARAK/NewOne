@@ -3,7 +3,7 @@ import os
 import logging
 from abc import ABC, abstractmethod
 
-# SDK imports
+# --- SDK Imports ---
 try:
     import google.generativeai as genai
     from google.generativeai.types import GenerationConfig
@@ -24,16 +24,18 @@ try:
 except ImportError:
     ollama_available = False
 
-# Local imports
+# --- Local Imports ---
 try:
     from . import config as service_config
 except ImportError:
     import config as service_config
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
-# Prompt templates
+ollama_available = bool(ChatOllama and HumanMessage)
+
+
+# --- Prompt Templates (Full versions for stability) ---
 _SYNTHESIS_PROMPT_TEMPLATE = """You are a helpful AI assistant. Your behavior depends entirely on whether 'CONTEXT' is provided.
 **RULE 1: ANSWER FROM CONTEXT**
 If the 'CONTEXT' section below is NOT empty, you MUST base your answer *only* on the information within that context.
@@ -51,7 +53,8 @@ If the 'CONTEXT' section below IS empty, you MUST act as a general knowledge ass
 **QUERY:**
 {query}
 ---
-EXECUTE NOW based on the rules."""
+EXECUTE NOW based on the rules.
+"""
 
 _ANALYSIS_PROMPT_TEMPLATES = {
     "faq": """You are a data processing machine. Your only function is to extract questions and answers from the provided text.
@@ -78,7 +81,6 @@ Format the output as a numbered list. Example:
 --- END DOCUMENT TEXT ---
 EXECUTE NOW. CREATE THE MERMAID MIND MAP."""
 }
-
 _SUB_QUERY_TEMPLATE = """You are an AI assistant skilled at query decomposition. Your task is to break down a complex user question into {num_queries} simpler, self-contained sub-questions that can be answered independently by a search engine.
 **CRITICAL RULES:**
 1.  **ONLY OUTPUT THE QUESTIONS:** Do not include any preamble, numbering, or explanation.
@@ -89,7 +91,6 @@ _SUB_QUERY_TEMPLATE = """You are an AI assistant skilled at query decomposition.
 
 **SUB-QUESTIONS (One per line):**
 """
-
 _RELEVANCE_CHECK_PROMPT_TEMPLATE = """You are a relevance-checking AI. Your task is to determine if the provided 'CONTEXT' is useful for answering the 'USER QUERY'.
 Respond with only 'Yes' or 'No'. Do not provide any other explanation.
 
@@ -101,6 +102,31 @@ CONTEXT:
 ---
 
 Is the context relevant to the query? Answer Yes or No.
+"""
+
+# ✅ 1. ADD THIS NEW PROMPT TEMPLATE at the top with your other templates.
+# This template is highly structured to ensure consistent report quality.
+_REPORT_GENERATION_PROMPT_TEMPLATE = """You are a professional research analyst and technical writer. Your sole task is to generate a comprehensive, well-structured report on a given topic. You must base your report *exclusively* on the provided context from web search results.
+
+**CRITICAL RULES:**
+1.  **Strictly Use Context:** You MUST base your entire report on the information found in the "SEARCH RESULTS CONTEXT" section below. Do not use any external or prior knowledge.
+2.  **Markdown Formatting:** The entire output MUST be in valid, clean Markdown format. Use headings (e.g., `#`, `##`, `###`), bold text, bullet points, and numbered lists to create a readable and professional document.
+3.  **Report Structure:** The report must follow this exact structure, section by section:
+    - A main title: `# Report: {topic}`
+    - `## 1. Executive Summary`: A brief, high-level paragraph summarizing the most critical aspects of the topic and the key conclusions of the report.
+    - `## 2. Key Findings`: A bulleted list that concisely presents the most important points, data, or facts discovered in the context (aim for 3-5 distinct bullet points).
+    - `## 3. Detailed Analysis`: A more in-depth section expanding on the key findings. This should be the longest part of the report. Use subheadings (e.g., `### Sub-Topic 1`, `### Sub-Topic 2`) for clarity and to organize different facets of the analysis.
+    - `## 4. Conclusion`: A concluding paragraph that summarizes the analysis and provides a final, overarching takeaway.
+    - `## 5. Sources Used`: A numbered list of the sources from the context that were used to build the report. You MUST cite which information came from which source in the analysis section using footnotes like `[1]`, `[2]`, etc.
+
+---
+**SEARCH RESULTS CONTEXT:**
+{context_text}
+---
+**TOPIC TO REPORT ON:**
+{topic}
+---
+GENERATE THE MARKDOWN REPORT NOW.
 """
 
 # Utility: Parse LLM output into answer + reasoning
@@ -147,72 +173,70 @@ class GeminiHandler(BaseLLMHandler):
         if not genai:
             raise ConnectionError("Gemini SDK missing.")
     def _configure_client(self):
-        genai.configure(api_key=self.api_keys.get('gemini'))
-    def generate_response(self, prompt, is_chat=True):
-        model = genai.GenerativeModel(self.model_name or "gemini-1.5-flash")
-        return model.generate_content(prompt).text
+        gemini_key = self.api_keys.get('gemini')
+        if not gemini_key: raise ValueError("Gemini API key not found.")
+        genai.configure(api_key=gemini_key)
+    def generate_response(self, prompt: str, is_chat: bool = True) -> str:
+        system_instruction = self.kwargs.get('system_prompt') if is_chat else None
+        client = genai.GenerativeModel(self.model_name or os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-flash"),
+            generation_config=GenerationConfig(temperature=0.7),
+            system_instruction=system_instruction)
+        if is_chat:
+            history = self.kwargs.get('chat_history', [])
+            history_for_api = [{'role': 'user' if msg.get('role') == 'user' else 'model', 'parts': [msg.get('parts', [{}])[0].get('text', "")]} for msg in history if msg.get('parts', [{}])[0].get('text')]
+            chat_session = client.start_chat(history=history_for_api)
+            response = chat_session.send_message(prompt)
+        else:
+            response = client.generate_content(prompt)
+        return response.text
 
 class GroqHandler(BaseLLMHandler):
     def _validate_sdk(self):
         if not Groq:
             raise ConnectionError("Groq SDK missing.")
     def _configure_client(self):
-        self.client = Groq(api_key=self.api_keys.get('groq'))
-    def generate_response(self, prompt, is_chat=True):
-        messages = [{"role": "user", "content": prompt}]
-        return self.client.chat.completions.create(messages=messages, model=self.model_name).choices[0].message.content
+        grok_key = self.api_keys.get('grok')
+        if not grok_key: raise ValueError("Groq API key not found.")
+        self.client = Groq(api_key=grok_key)
+    def generate_response(self, prompt: str, is_chat: bool = True) -> str:
+        messages = []
+        if is_chat:
+            if system_prompt := self.kwargs.get('system_prompt'):
+                messages.append({"role": "system", "content": system_prompt})
+            history = self.kwargs.get('chat_history', [])
+            messages.extend([{'role': 'assistant' if msg.get('role') == 'model' else 'user', 'content': msg.get('parts', [{}])[0].get('text', "")} for msg in history])
+        messages.append({"role": "user", "content": prompt})
+        completion = self.client.chat.completions.create(messages=messages, model=self.model_name or os.getenv("DEFAULT_GROQ_LLAMA3_MODEL", "llama3-8b-8192"))
+        return completion.choices[0].message.content
 
 class OllamaHandler(BaseLLMHandler):
     def _validate_sdk(self):
         if not ChatOllama:
             raise ConnectionError("Ollama SDK missing.")
     def _configure_client(self):
-        base_url = self.api_keys.get("ollama_host", "http://localhost:11434")
-        self.client = ChatOllama(base_url=base_url, model=self.model_name)
-    def generate_response(self, prompt, is_chat=True):
-        messages = [HumanMessage(content=prompt)]
-        return self.client.invoke(messages).content
+        host = self.kwargs.get('ollama_host') or self.api_keys.get("ollama_host") or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        self.client = ChatOllama(base_url=host, model=self.model_name or os.getenv("DEFAULT_OLLAMA_MODEL", "llama3"))
+    def generate_response(self, prompt: str, is_chat: bool = True) -> str:
+        messages = []
+        if is_chat:
+            if system_prompt := self.kwargs.get('system_prompt'):
+                messages.append(SystemMessage(content=system_prompt))
+            history = self.kwargs.get('chat_history', [])
+            messages.extend([AIMessage(content=msg.get('parts', [{}])[0].get('text', "")) if msg.get('role') == 'model' else HumanMessage(content=msg.get('parts', [{}])[0].get('text', "")) for msg in history])
+        messages.append(HumanMessage(content=prompt))
+        response = self.client.invoke(messages)
+        return response.content
 
-# Provider map
-PROVIDER_MAP = {
-    "gemini": GeminiHandler,
-    "groq": GroqHandler,
-    "ollama": OllamaHandler
-}
+PROVIDER_MAP = {"gemini": GeminiHandler, "groq": GroqHandler, "ollama": OllamaHandler}
 
-def get_handler(provider_name, **kwargs):
-    handler_cls = PROVIDER_MAP.get(provider_name)
-    if not handler_cls:
-        raise ValueError(f"Unsupported LLM provider: {provider_name}")
-    return handler_cls(**kwargs)
+def get_handler(provider_name: str, **kwargs) -> BaseLLMHandler:
+    handler_class = next((handler for key, handler in PROVIDER_MAP.items() if provider_name.startswith(key)), None)
+    if not handler_class: raise ValueError(f"Unsupported LLM provider: {provider_name}")
+    return handler_class(**kwargs)
 
-# Generate with fallback across providers
-def generate_with_fallback(query, context_text, api_keys, history=[], system_prompt=None):
-    providers = [
-        ("ollama", "llama3"),
-        ("groq", "llama3-8b-8192"),
-        ("gemini", "gemini-1.5-flash")
-    ]
-    final_prompt = _SYNTHESIS_PROMPT_TEMPLATE.format(query=query, context_text=context_text)
-
-    for provider, model in providers:
-        try:
-            handler = get_handler(
-                provider_name=provider,
-                api_keys=api_keys,
-                model_name=model,
-                system_prompt=system_prompt,
-                chat_history=history
-            )
-            raw_response = handler.generate_response(final_prompt, is_chat=True)
-            answer, thinking = _parse_thinking_and_answer(raw_response)
-            return answer, thinking, provider
-        except Exception as e:
-            logger.warning(f"[Fallback] {provider.upper()} failed: {e}")
-
-    return "Sorry, all AI services are currently down. Try again later.", None, "none"
-
-# Relevance check utility
+# ==================================================================
+#  DEFINITIVE FIX: Correct the relevance check function
+# ==================================================================
 def check_context_relevance(query: str, context: str, **kwargs) -> bool:
     logger.info("Performing relevance check on retrieved context...")
     try:
@@ -223,7 +247,12 @@ def check_context_relevance(query: str, context: str, **kwargs) -> bool:
         )
         prompt = _RELEVANCE_CHECK_PROMPT_TEMPLATE.format(query=query, context=context)
         raw_response = handler.generate_response(prompt, is_chat=False)
-        return raw_response.strip().lower().startswith('yes')
+        
+        decision = raw_response.strip().lower()
+        logger.info(f"Relevance check decision: '{decision}'")
+        
+        # Check for 'yes' at the beginning of the string for robustness
+        return decision.startswith('yes')
     except Exception as e:
         logger.error(f"Context relevance check failed: {e}. Defaulting to 'relevant'.")
         return True
@@ -235,7 +264,6 @@ def generate_sub_queries(original_query: str, llm_provider: str, num_queries: in
         utility_kwargs = kwargs.copy()
         utility_kwargs.pop('chat_history', None)
         utility_kwargs.pop('system_prompt', None)
-
         handler = get_handler(provider_name=llm_provider, **utility_kwargs)
         prompt = _SUB_QUERY_TEMPLATE.format(original_query=original_query, num_queries=num_queries)
         raw_response = handler.generate_response(prompt, is_chat=False)
@@ -246,11 +274,37 @@ def generate_sub_queries(original_query: str, llm_provider: str, num_queries: in
 
 # Normal chat generation using specific provider
 def generate_response(llm_provider: str, query: str, context_text: str, **kwargs) -> tuple[str, str | None]:
-    logger.info(f"Generating CHAT response with provider: {llm_provider}.")
+    """
+    This function is now ONLY for RAG-based responses.
+    """
+    logger.info(f"Generating RAG response with provider: {llm_provider}.")
     final_prompt = _SYNTHESIS_PROMPT_TEMPLATE.format(query=query, context_text=context_text)
     handler = get_handler(provider_name=llm_provider, **kwargs)
+    # The handlers will internally use chat_history if it's passed in kwargs
     raw_response = handler.generate_response(final_prompt, is_chat=True)
     return _parse_thinking_and_answer(raw_response)
+    
+# ==================== CHANGE 4: START ====================
+# ADD THIS NEW FUNCTION
+def generate_chat_response(llm_provider: str, query: str, **kwargs) -> tuple[str, str | None]:
+    """
+    Generates a direct conversational response using chat history, without the RAG template.
+    """
+    logger.info(f"Generating conversational (non-RAG) response with provider: {llm_provider}.")
+    
+    # We don't use the _SYNTHESIS_PROMPT_TEMPLATE here.
+    # The prompt is just the user's query.
+    # The full conversation context is built inside the handler from the 'chat_history' in kwargs.
+    
+    handler = get_handler(provider_name=llm_provider, **kwargs)
+    
+    # Call the handler. The handler will assemble the history and the new query.
+    raw_response = handler.generate_response(query, is_chat=True)
+    
+    # We don't expect "Thinking..." or "Answer:" formatting in a direct chat,
+    # so we return the raw response directly.
+    return raw_response, None
+# ==================== CHANGE 4: END ====================
 
 # Document analysis wrapper
 def perform_document_analysis(document_text: str, analysis_type: str, llm_provider: str, **kwargs) -> tuple[str | None, str | None]:
