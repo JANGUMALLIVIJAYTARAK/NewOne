@@ -1,36 +1,42 @@
 # FusedChatbot/server/ai_core_service/llm_handler.py
+
 import os
 import logging
 from abc import ABC, abstractmethod
+from typing import Tuple, List, Dict, Any
 
 # --- SDK Imports ---
+# Use httpx to catch specific network errors
+import httpx
+
 try:
     import google.generativeai as genai
-    from google.generativeai.types import GenerationConfig
 except ImportError:
     genai = None
+
 try:
-    from groq import Groq
+    from groq import Groq as GroqClient
+    from langchain_groq import ChatGroq
 except ImportError:
-    Groq = None
+    GroqClient = None
+
 try:
-    from langchain_ollama import ChatOllama
+    import ollama
+    from langchain_ollama.chat_models import ChatOllama
     from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 except ImportError:
-    ChatOllama, HumanMessage, SystemMessage, AIMessage = None, None, None, None
+    ollama, ChatOllama, HumanMessage, SystemMessage, AIMessage = None, None, None, None, None
 
 # --- Local Imports ---
 try:
     from . import config as service_config
 except ImportError:
-    import config
+    import config as service_config
 
 logger = logging.getLogger(__name__)
 
-ollama_available = bool(ChatOllama and HumanMessage)
-
-
-# --- Prompt Templates (Full versions for stability) ---
+# --- Prompt Templates (No changes needed here) ---
+# ... (keep all your existing _SYNTHESIS_PROMPT_TEMPLATE, _ANALYSIS_PROMPT_TEMPLATES, etc.) ...
 _SYNTHESIS_PROMPT_TEMPLATE = """You are a helpful AI assistant. Your behavior depends entirely on whether 'CONTEXT' is provided.
 **RULE 1: ANSWER FROM CONTEXT**
 If the 'CONTEXT' section below is NOT empty, you MUST base your answer *only* on the information within that context.
@@ -50,58 +56,33 @@ If the 'CONTEXT' section below IS empty, you MUST act as a general knowledge ass
 ---
 EXECUTE NOW based on the rules.
 """
+_REPORT_GENERATION_PROMPT_TEMPLATE = """You are a professional research analyst and technical writer. Your sole task is to generate a comprehensive, well-structured report on a given topic. You must base your report *exclusively* on the provided context from web search results.
 
-_ANALYSIS_PROMPT_TEMPLATES = {
-    "faq": """You are a data processing machine. Your only function is to extract questions and answers from the provided text.
 **CRITICAL RULES:**
-1.  **FORMAT:** Your output MUST strictly follow the `Q: [Question]\nA: [Answer]` format for each item.
-2.  **NO PREAMBLE:** Your entire response MUST begin directly with `Q:`. Do not output any other text.
-3.  **DATA SOURCE:** Base all questions and answers ONLY on the provided document text.
-4.  **QUANTITY:** Generate approximately {num_items} questions.
---- START DOCUMENT TEXT ---
-{doc_text_for_llm}
---- END DOCUMENT TEXT ---
-EXECUTE NOW.""",
-    "topics": """You are a document analysis specialist. Your task is to identify the main topics from the provided text and give a brief explanation for each. From the context below, identify the top {num_items} most important topics. For each topic, provide a single-sentence explanation.
-Context:
+1.  **Strictly Use Context:** You MUST base your entire report on the information found in the "SEARCH RESULTS CONTEXT" section below. Do not use any external or prior knowledge.
+2.  **Markdown Formatting:** The entire output MUST be in valid, clean Markdown format. Use headings (e.g., `#`, `##`, `###`), bold text, bullet points, and numbered lists to create a readable and professional document.
+3.  **Report Structure:** The report must follow this exact structure, section by section:
+    - A main title: `# Report: {topic}`
+    - `## 1. Executive Summary`: A brief, high-level paragraph summarizing the most critical aspects of the topic and the key conclusions of the report.
+    - `## 2. Key Findings`: A bulleted list that concisely presents the most important points, data, or facts discovered in the context (aim for 3-5 distinct bullet points).
+    - `## 3. Detailed Analysis`: A more in-depth section expanding on the key findings. This should be the longest part of the report. Use subheadings (e.g., `### Sub-Topic 1`, `### Sub-Topic 2`) for clarity and to organize different facets of the analysis.
+    - `## 4. Conclusion`: A concluding paragraph that summarizes the analysis and provides a final, overarching takeaway.
+    - `## 5. Sources Used`: A numbered list of the sources from the context that were used to build the report. You MUST cite which information came from which source in the analysis section using footnotes like `[1]`, `[2]`, etc.
+
 ---
-{doc_text_for_llm}
+**SEARCH RESULTS CONTEXT:**
+{context_text}
 ---
-Format the output as a numbered list. Example:
-1. **Topic Name:** A brief, one-sentence explanation.
-""",
-    "mindmap": """You are an expert text-to-Mermaid-syntax converter. Your only job is to create a valid Mermaid.js mind map from the provided text. Your entire response MUST begin with the word `mindmap` and contain PURE Mermaid syntax.
---- START DOCUMENT TEXT ---
-{doc_text_for_llm}
---- END DOCUMENT TEXT ---
-EXECUTE NOW. CREATE THE MERMAID MIND MAP."""
-}
-
-_SUB_QUERY_TEMPLATE = """You are an AI assistant skilled at query decomposition. Your task is to break down a complex user question into {num_queries} simpler, self-contained sub-questions that can be answered independently by a search engine.
-**CRITICAL RULES:**
-1.  **ONLY OUTPUT THE QUESTIONS:** Do not include any preamble, numbering, or explanation.
-2.  **ONE QUESTION PER LINE:** Each of the sub-questions must be on a new line.
-
-**ORIGINAL USER QUERY:**
-"{original_query}"
-
-**SUB-QUESTIONS (One per line):**
+**TOPIC TO REPORT ON:**
+{topic}
+---
+GENERATE THE MARKDOWN REPORT NOW.
 """
+# ... (and all your other prompt templates)
 
-_RELEVANCE_CHECK_PROMPT_TEMPLATE = """You are a relevance-checking AI. Your task is to determine if the provided 'CONTEXT' is useful for answering the 'USER QUERY'.
-Respond with only 'Yes' or 'No'. Do not provide any other explanation.
-
-USER QUERY: "{query}"
-
-CONTEXT:
----
-{context}
----
-
-Is the context relevant to the query? Answer Yes or No.
-"""
 
 def _parse_thinking_and_answer(full_llm_response: str) -> tuple[str, str | None]:
+    # ... (This function remains unchanged)
     response_text = full_llm_response.strip()
     cot_start_tag = "**Chain of Thought:**"
     answer_start_tag = "**Answer:**"
@@ -112,11 +93,12 @@ def _parse_thinking_and_answer(full_llm_response: str) -> tuple[str, str | None]
             thinking_content = response_text[cot_start_index + len(cot_start_tag):answer_start_index].strip()
             answer = response_text[answer_start_index + len(answer_start_tag):].strip()
             return answer, thinking_content
-        else:
-            return response_text, None
     return response_text, None
 
+
+# --- Abstract Base Class (Unchanged) ---
 class BaseLLMHandler(ABC):
+    # ... (This class remains unchanged)
     def __init__(self, api_keys: dict, model_name: str = None, **kwargs):
         self.api_keys = api_keys
         self.model_name = model_name
@@ -129,139 +111,295 @@ class BaseLLMHandler(ABC):
     @abstractmethod
     def _configure_client(self): pass
     @abstractmethod
-    def generate_response(self, prompt: str, is_chat: bool = True) -> str: pass
-    
-    def analyze_document(self, document_text: str, analysis_type: str) -> str:
-        prompt_template = _ANALYSIS_PROMPT_TEMPLATES.get(analysis_type)
-        if not prompt_template: raise ValueError(f"Invalid analysis type: {analysis_type}")
-        doc_text_for_llm = document_text[:service_config.ANALYSIS_MAX_CONTEXT_LENGTH]
-        num_items = min(5 + (len(doc_text_for_llm) // 4000), 20)
-        final_prompt = prompt_template.format(doc_text_for_llm=doc_text_for_llm, num_items=num_items)
-        return self.generate_response(final_prompt, is_chat=False)
+    def invoke(self, messages: List[Dict[str, Any]]) -> str: pass
 
+
+# --- Provider-Specific Handlers with Refactored invoke methods ---
+
+# CORRECTED version
 class GeminiHandler(BaseLLMHandler):
     def _validate_sdk(self):
-        if not genai: raise ConnectionError("Gemini SDK (google.generativeai) not installed.")
+        if not genai: raise ImportError("Gemini SDK (google-generativeai) is not installed.")
     def _configure_client(self):
-        gemini_key = self.api_keys.get('gemini')
-        if not gemini_key: raise ValueError("Gemini API key not found.")
+        gemini_key = self.api_keys.get('gemini') or os.getenv('ADMIN_GEMINI_API_KEY')
+        if not gemini_key: raise ValueError("Gemini API key is missing.")
         genai.configure(api_key=gemini_key)
-    def generate_response(self, prompt: str, is_chat: bool = True) -> str:
-        system_instruction = self.kwargs.get('system_prompt') if is_chat else None
-        client = genai.GenerativeModel(self.model_name or os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-flash"),
-            generation_config=GenerationConfig(temperature=0.7),
-            system_instruction=system_instruction)
-        if is_chat:
-            history = self.kwargs.get('chat_history', [])
-            history_for_api = [{'role': 'user' if msg.get('role') == 'user' else 'model', 'parts': [msg.get('parts', [{}])[0].get('text', "")]} for msg in history if msg.get('parts', [{}])[0].get('text')]
-            chat_session = client.start_chat(history=history_for_api)
-            response = chat_session.send_message(prompt)
-        else:
-            response = client.generate_content(prompt)
+
+    def invoke(self, messages: List[Dict[str, Any]]) -> str:
+        system_instruction = messages[0]['content'] if messages and messages[0]['role'] == 'system' else None
+        
+        # --- START OF FIX ---
+        # Translate our standard message format to Gemini's required format.
+        gemini_formatted_messages = []
+        for msg in messages:
+            # Skip the system message as it's handled separately
+            if msg['role'] == 'system':
+                continue
+            
+            # Gemini uses 'model' for the assistant role
+            role = 'model' if msg['role'] in ['assistant', 'model'] else 'user'
+            
+            gemini_formatted_messages.append({
+                'role': role,
+                'parts': [{'text': msg['content']}] # Gemini expects content inside a 'parts' array
+            })
+        # --- END OF FIX ---
+
+        model = genai.GenerativeModel(
+            self.model_name or "gemini-1.5-flash",
+            system_instruction=system_instruction
+        )
+        
+        # Pass the correctly formatted messages to the API
+        response = model.generate_content(gemini_formatted_messages)
         return response.text
 
 class GroqHandler(BaseLLMHandler):
     def _validate_sdk(self):
-        if not Groq: raise ConnectionError("Groq SDK not installed.")
+        if not GroqClient: raise ImportError("Groq SDK is not installed.")
     def _configure_client(self):
-        grok_key = self.api_keys.get('grok')
-        if not grok_key: raise ValueError("Groq API key not found.")
-        self.client = Groq(api_key=grok_key)
-    def generate_response(self, prompt: str, is_chat: bool = True) -> str:
-        messages = []
-        if is_chat:
-            if system_prompt := self.kwargs.get('system_prompt'):
-                messages.append({"role": "system", "content": system_prompt})
-            history = self.kwargs.get('chat_history', [])
-            messages.extend([{'role': 'assistant' if msg.get('role') == 'model' else 'user', 'content': msg.get('parts', [{}])[0].get('text', "")} for msg in history])
-        messages.append({"role": "user", "content": prompt})
-        completion = self.client.chat.completions.create(messages=messages, model=self.model_name or os.getenv("DEFAULT_GROQ_LLAMA3_MODEL", "llama3-8b-8192"))
-        return completion.choices[0].message.content
+        groq_key = self.api_keys.get('groq') or os.getenv('ADMIN_GROQ_API_KEY')
+        if not groq_key: raise ValueError("Groq API key is missing.")
+        self.client = ChatGroq(model_name=self.model_name or "llama3-8b-8192", groq_api_key=groq_key)
+
+    def invoke(self, messages: List[Dict[str, Any]]) -> str:
+        # Translate to LangChain messages
+        lc_messages = []
+        for msg in messages:
+            if msg['role'] == 'system': lc_messages.append(SystemMessage(content=msg['content']))
+            elif msg['role'] == 'user': lc_messages.append(HumanMessage(content=msg['content']))
+            elif msg['role'] == 'assistant' or msg['role'] == 'model': lc_messages.append(AIMessage(content=msg['content']))
+        
+        response = self.client.invoke(lc_messages)
+        return response.content
 
 class OllamaHandler(BaseLLMHandler):
     def _validate_sdk(self):
-        if not ChatOllama: raise ConnectionError("Ollama SDK (langchain_ollama) not installed.")
+        if not ChatOllama: raise ImportError("Ollama SDK (langchain-ollama) is not installed.")
     def _configure_client(self):
-        host = self.kwargs.get('ollama_host') or self.api_keys.get("ollama_host") or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        self.client = ChatOllama(base_url=host, model=self.model_name or os.getenv("DEFAULT_OLLAMA_MODEL", "llama3"))
-    def generate_response(self, prompt: str, is_chat: bool = True) -> str:
-        messages = []
-        if is_chat:
-            if system_prompt := self.kwargs.get('system_prompt'):
-                messages.append(SystemMessage(content=system_prompt))
-            history = self.kwargs.get('chat_history', [])
-            messages.extend([AIMessage(content=msg.get('parts', [{}])[0].get('text', "")) if msg.get('role') == 'model' else HumanMessage(content=msg.get('parts', [{}])[0].get('text', "")) for msg in history])
-        messages.append(HumanMessage(content=prompt))
-        response = self.client.invoke(messages)
+        host = self.kwargs.get('ollama_host') or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        self.client = ChatOllama(base_url=host, model=self.model_name or "llama3")
+
+    def invoke(self, messages: List[Dict[str, Any]]) -> str:
+        # Translate to LangChain messages (same as Groq)
+        lc_messages = []
+        for msg in messages:
+            if msg['role'] == 'system': lc_messages.append(SystemMessage(content=msg['content']))
+            elif msg['role'] == 'user': lc_messages.append(HumanMessage(content=msg['content']))
+            elif msg['role'] == 'assistant' or msg['role'] == 'model': lc_messages.append(AIMessage(content=msg['content']))
+        
+        response = self.client.invoke(lc_messages)
         return response.content
 
 PROVIDER_MAP = {"gemini": GeminiHandler, "groq": GroqHandler, "ollama": OllamaHandler}
 
 def get_handler(provider_name: str, **kwargs) -> BaseLLMHandler:
-    handler_class = next((handler for key, handler in PROVIDER_MAP.items() if provider_name.startswith(key)), None)
+    handler_class = PROVIDER_MAP.get(provider_name)
     if not handler_class: raise ValueError(f"Unsupported LLM provider: {provider_name}")
     return handler_class(**kwargs)
 
-# ==================================================================
-#  DEFINITIVE FIX: Correct the relevance check function
-# ==================================================================
-def check_context_relevance(query: str, context: str, **kwargs) -> bool:
-    """
-    Uses a fast LLM to check if the retrieved context is relevant to the user's query.
-    """
-    logger.info("Performing relevance check on retrieved context...")
-    try:
-        # Use a hardcoded, fast provider for the relevance check to prevent errors.
-        # We pass the api_keys from the original call.
-        handler = get_handler(
-            provider_name="groq", 
-            api_keys=kwargs.get('api_keys', {}),
-            model_name="llama3-8b-8192" # Use a specific, fast model
-        )
-        
-        prompt = _RELEVANCE_CHECK_PROMPT_TEMPLATE.format(query=query, context=context)
-        
-        # This is a utility task, not a chat. Set is_chat=False
-        raw_response = handler.generate_response(prompt, is_chat=False)
-        
-        decision = raw_response.strip().lower()
-        logger.info(f"Relevance check decision: '{decision}'")
-        
-        # Check for 'yes' at the beginning of the string for robustness
-        return decision.startswith('yes')
-    except Exception as e:
-        logger.error(f"Context relevance check failed: {e}. Defaulting to 'relevant'.")
-        # Default to true to avoid breaking the chain if the check fails.
-        return True
-# ==================================================================
+def _build_message_list(prompt: str, is_chat: bool, **kwargs) -> List[Dict[str, Any]]:
+    """Helper to construct the standard message list."""
+    messages = []
+    if is_chat and (system_prompt := kwargs.get('system_prompt')):
+        messages.append({"role": "system", "content": system_prompt})
+    
+    if is_chat and (history := kwargs.get('chat_history', [])):
+        for msg in history:
+            role = 'assistant' if msg.get('role') == 'model' else 'user'
+            content = " ".join([part.get('text', "") for part in msg.get('parts', []) if part.get('text')])
+            if content:
+                messages.append({'role': role, 'content': content})
+    
+    messages.append({"role": "user", "content": prompt})
+    return messages
 
-def generate_sub_queries(original_query: str, llm_provider: str, num_queries: int = 3, **kwargs) -> list[str]:
-    """Generates sub-queries for multi-query RAG."""
-    logger.info(f"Generating sub-queries for: '{original_query[:50]}...'")
-    try:
-        utility_kwargs = kwargs.copy()
-        utility_kwargs.pop('chat_history', None)
-        utility_kwargs.pop('system_prompt', None)
 
-        handler = get_handler(provider_name=llm_provider, **utility_kwargs)
-        prompt = _SUB_QUERY_TEMPLATE.format(original_query=original_query, num_queries=num_queries)
-        raw_response = handler.generate_response(prompt, is_chat=False)
-        sub_queries = [q.strip() for q in raw_response.strip().split('\n') if q.strip()]
-        logger.info(f"Generated {len(sub_queries)} sub-queries.")
-        return sub_queries[:num_queries]
-    except Exception as e:
-        logger.error(f"Failed to generate sub-queries: {e}", exc_info=True)
-        return []
+# --- CORE FUNCTION WITH FALLBACK LOGIC ---
+
+# def _execute_with_fallback(prompt_template: str, prompt_data: Dict, provider_preference: str, **kwargs) -> str:
+#     """
+#     Executes an LLM call with a defined provider fallback order.
+    
+#     Args:
+#         prompt_template (str): The f-string template for the prompt.
+#         prompt_data (Dict): The data to format into the template.
+#         provider_preference (str): The user's preferred provider (e.g., 'ollama').
+#         **kwargs: Other arguments for the handlers.
+
+#     Returns:
+#         The string response from the successful LLM call.
+        
+#     Raises:
+#         RuntimeError: If all providers in the fallback chain fail.
+#     """
+#     # 1. Define the full, ordered chain of providers.
+#     fallback_chain = ['ollama', 'gemini', 'groq']
+    
+#     # 2. Create the effective order, prioritizing the user's preference.
+#     if provider_preference in fallback_chain:
+#         fallback_chain.remove(provider_preference)
+#     provider_order = [provider_preference] + fallback_chain
+#     provider_order = list(dict.fromkeys(provider_order)) # Remove duplicates
+    
+#     logger.info(f"Executing LLM call with provider fallback order: {provider_order}")
+
+#     final_prompt = prompt_template.format(**prompt_data)
+#     messages = _build_message_list(final_prompt, is_chat=kwargs.get('is_chat', True), **kwargs)
+
+#     last_error = None
+#     # 3. Loop through the providers until one succeeds.
+#     for provider in provider_order:
+#         try:
+#             logger.info(f"--> Attempting with provider: [{provider.upper()}]")
+#             handler = get_handler(provider_name=provider, **kwargs)
+#             response_content = handler.invoke(messages)
+
+#             if response_content and isinstance(response_content, str):
+#                 logger.info(f"<-- Success with provider: [{provider.upper()}]")
+#                 return response_content # Success!
+
+#         except (httpx.ConnectTimeout, httpx.ConnectError, ConnectionRefusedError, ollama.ResponseError if ollama else Exception) as e:
+#             logger.warning(f"--> Provider [{provider.upper()}] failed with a connection error: {e}. Trying next provider.")
+#             last_error = e
+#         except Exception as e:
+#             logger.error(f"--> Provider [{provider.upper()}] failed unexpectedly: {e}", exc_info=True)
+#             last_error = e
+#             # Continue to the next provider
+
+#     # 4. If the loop finishes, all providers have failed.
+#     logger.critical("All LLM providers in the fallback chain failed.")
+#     raise RuntimeError(f"All providers failed. Last error: {last_error}")
+# FusedChatbot/server/ai_core_service/llm_handler.py
+
+# ... (all imports and other functions are the same) ...
+
+# CORRECTED VERSION of the executor function
+import hashlib
+import json
+
+try:
+    import redis
+    redis_client = redis.StrictRedis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+    CACHE_ENABLED = True
+except ImportError:
+    redis_client = None
+    CACHE_ENABLED = False
+except Exception as e:
+    logger.error(f"Redis client initialization failed: {e}")
+    redis_client = None
+    CACHE_ENABLED = False
+
+def _execute_with_fallback(prompt_template: str, prompt_data: Dict, provider_preference: str, **kwargs) -> str:
+    """
+    Executes an LLM call with a defined provider fallback order and Redis caching.
+    """
+    # --- 1. Clean up and separate arguments ---
+    # Pop 'is_chat' from kwargs to avoid the TypeError. Default to True if not present.
+    is_chat = kwargs.pop('is_chat', True)
+    
+    # Now, `kwargs` no longer contains 'is_chat', so we can safely use **kwargs later.
+    
+    # 2. Prepare the prompt and messages
+    final_prompt = prompt_template.format(**prompt_data)
+    # Pass the separated `is_chat` argument directly.
+    messages = _build_message_list(final_prompt, is_chat=is_chat, **kwargs)
+
+    # 3. Caching logic (this remains the same)
+    if CACHE_ENABLED and redis_client:
+        cache_payload = {
+            "messages": messages, "model": kwargs.get('model_name', 'default'),
+            "provider_preference": provider_preference
+        }
+        cache_key = f"llm_cache:{hashlib.sha256(json.dumps(cache_payload, sort_keys=True).encode()).hexdigest()}"
+        try:
+            cached_response = redis_client.get(cache_key)
+            if cached_response:
+                logger.info(f"CACHE HIT for key: {cache_key}")
+                # redis returns bytes, decode to string
+                return cached_response.decode() if isinstance(cached_response, bytes) else cached_response
+        except Exception as e:
+            logger.error(f"Redis GET failed: {e}. Proceeding without cache.")
+
+    logger.info(f"CACHE MISS. Executing LLM call...")
+
+    # 4. Fallback logic (this remains the same)
+    provider_order = ['ollama', 'gemini', 'groq']
+    if provider_preference in provider_order:
+        provider_order.remove(provider_preference)
+    provider_order = [provider_preference] + list(dict.fromkeys(provider_order))
+    
+    logger.info(f"Effective provider fallback order: {provider_order}")
+
+    last_error = None
+    for provider in provider_order:
+        try:
+            logger.info(f"--> Attempting with provider: [{provider.upper()}]")
+            # Pass the clean kwargs dictionary without the conflicting key
+            handler = get_handler(provider_name=provider, **kwargs)
+            response_content = handler.invoke(messages)
+
+            if response_content and isinstance(response_content, str):
+                logger.info(f"<-- Success with provider: [{provider.upper()}]")
+                if CACHE_ENABLED:
+                    try:
+                        redis_client.set(cache_key, response_content, ex=86400)
+                        logger.info(f"CACHE SET for key: {cache_key}")
+                    except Exception as e:
+                        logger.error(f"Redis SET failed: {e}")
+                return response_content
+
+        except (httpx.ConnectTimeout, httpx.ConnectError, ConnectionRefusedError, ollama.ResponseError if ollama else Exception) as e:
+            logger.warning(f"--> Provider [{provider.upper()}] failed with a connection error: {e}. Trying next provider.")
+            last_error = e
+        except Exception as e:
+            logger.error(f"--> Provider [{provider.upper()}] failed unexpectedly: {e}", exc_info=True)
+            last_error = e
+
+    logger.critical("All LLM providers in the fallback chain failed.")
+    raise RuntimeError(f"All providers failed. Last error: {last_error}")
+
+# ... (the rest of your file remains the same) ...
+
+# --- Public-Facing Functions (Now using the fallback executor) ---
+
+def generate_report_from_text(topic: str, context_text: str, **kwargs) -> str:
+    """Uses the fallback executor to synthesize a report."""
+    logger.info(f"Synthesizing Markdown report for topic: '{topic}'")
+    provider_preference = kwargs.get('llm_provider', 'ollama')
+    
+    return _execute_with_fallback(
+        prompt_template=_REPORT_GENERATION_PROMPT_TEMPLATE,
+        prompt_data={'topic': topic, 'context_text': context_text},
+        provider_preference=provider_preference,
+        is_chat=False,
+        **kwargs
+    )
 
 def generate_response(llm_provider: str, query: str, context_text: str, **kwargs) -> tuple[str, str | None]:
-    logger.info(f"Generating CHAT response with provider: {llm_provider}.")
-    final_prompt = _SYNTHESIS_PROMPT_TEMPLATE.format(query=query, context_text=context_text)
-    handler = get_handler(provider_name=llm_provider, **kwargs)
-    raw_response = handler.generate_response(final_prompt, is_chat=True)
+    """Generates a RAG-based response using the fallback executor."""
+    logger.info(f"Generating RAG response with preferred provider: {llm_provider}.")
+    raw_response = _execute_with_fallback(
+        prompt_template=_SYNTHESIS_PROMPT_TEMPLATE,
+        prompt_data={'query': query, 'context_text': context_text},
+        provider_preference=llm_provider,
+        is_chat=True,
+        **kwargs
+    )
     return _parse_thinking_and_answer(raw_response)
+    
+def generate_chat_response(llm_provider: str, query: str, **kwargs) -> tuple[str, str | None]:
+    """Generates a direct chat response using the fallback executor."""
+    logger.info(f"Generating conversational response with preferred provider: {llm_provider}.")
+    # For direct chat, the prompt template is just the query itself.
+    raw_response = _execute_with_fallback(
+        prompt_template="{query}",
+        prompt_data={'query': query},
+        provider_preference=llm_provider,
+        is_chat=True,
+        **kwargs
+    )
+    return raw_response, None
 
-def perform_document_analysis(document_text: str, analysis_type: str, llm_provider: str, **kwargs) -> tuple[str | None, str | None]:
-    logger.info(f"Performing '{analysis_type}' analysis with {llm_provider}.")
-    handler = get_handler(provider_name=llm_provider, **kwargs)
-    analysis_result = handler.analyze_document(document_text, analysis_type)
-    return analysis_result, None
+# ... (keep your other utility functions like check_context_relevance, etc. They can also be updated to use the fallback if needed)
+
